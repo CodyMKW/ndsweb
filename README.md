@@ -1,7 +1,3 @@
-Here is a casual, human-written `README.md` tailored for your GitHub repository. It hits all the right features from your code while keeping that chill, developer-to-developer vibe.
-
----
-
 # NDSWeb 🎮✨
 
 Play your favorite Nintendo DS, Game Boy Advance, Game Boy, and Game Boy Color games right inside your browser. No extra setup or complicated software needed—just drop your ROMs in and start playing.
