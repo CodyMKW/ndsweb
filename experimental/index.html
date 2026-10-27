@@ -3122,6 +3122,11 @@ function bindP2PUI() {
         video.muted = !video.muted;
         setIcon(e.currentTarget, video.muted ? 'volume-x' : 'volume-2');
     });
+   // --- ADD THESE LINES INSIDE bindP2PUI() ---
+    document.getElementById('p2p-chat-send').addEventListener('click', sendChatMessage);
+    document.getElementById('p2p-chat-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') sendChatMessage();
+    });
 }
 
 function appendChatMessage(sender, text) {
@@ -3203,10 +3208,6 @@ window.onload = async () => {
     document.getElementById('sort-select').value = savedSort;
     document.getElementById('sort-select').addEventListener('change', e => {
         localStorage.setItem('ndsweb_sort', e.target.value);
-   // --- ADD THESE LINES INSIDE bindP2PUI() ---
-    document.getElementById('p2p-chat-send').addEventListener('click', sendChatMessage);
-    document.getElementById('p2p-chat-input').addEventListener('keydown', e => {
-        if (e.key === 'Enter') sendChatMessage();
     });
 };
 </script>
