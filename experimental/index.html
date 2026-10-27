@@ -895,7 +895,7 @@
         /* Watch panel */
         #watch-panel {
             position: fixed; right: 1rem; bottom: 5.5rem;
-            width: min(320px, calc(100vw - 2rem));
+            width: min(340px, calc(100vw - 2rem));
             z-index: 120; border-radius: 1rem; overflow: hidden;
             box-shadow: 0 12px 40px rgba(0,0,0,0.5);
             background: rgba(15,15,20,0.92);
@@ -1392,10 +1392,21 @@
             <button id="wp-close" title="Stop watching"><i data-lucide="x"></i></button>
         </div>
     </div>
-    <div class="wp-body">
-        <video id="wp-video" autoplay playsinline></video>
-        <div id="wp-status">Connecting…</div>
+<div class="wp-body">
+    <video id="wp-video" autoplay playsinline></video>
+    <div id="wp-status">Connecting…</div>
+</div>
+
+<!-- ADD THIS CHAT BOX INSIDE THE WATCH PANEL -->
+<div style="padding: 0.5rem 0.75rem; background: rgba(15,15,20,0.95); border-top: 1px solid var(--white-5);">
+    <div id="wp-chat-log" style="height: 90px; overflow-y: auto; font-size: 0.75rem; margin-bottom: 0.5rem; display: flex; flex-direction: column; gap: 0.25rem;">
+        <div style="color: #6b7280; font-style: italic;">Chat ready...</div>
     </div>
+    <div class="join-row" style="gap: 0.4rem;">
+        <input type="text" id="wp-chat-input" class="text-input" placeholder="Type in stream chat..." style="font-size: 0.75rem; padding: 0.4rem 0.6rem;" autocomplete="off" />
+        <button id="wp-chat-send" class="btn-accent" style="padding: 0.4rem 0.7rem; font-size: 0.75rem;"><i data-lucide="send" style="width:0.85rem;height:0.85rem;"></i></button>
+    </div>
+</div>
 </div>
 
 <!-- In-game friends popup -->
@@ -3127,20 +3138,57 @@ function bindP2PUI() {
     document.getElementById('p2p-chat-input').addEventListener('keydown', e => {
         if (e.key === 'Enter') sendChatMessage();
     });
+
+// --- ADD THESE LINES INSIDE bindP2PUI() ---
+    const sendWpChat = () => {
+        const input = document.getElementById('wp-chat-input');
+        const text = input.value.trim();
+        if (!text) return;
+
+        let sent = false;
+        P2P.conns.forEach(rec => {
+            if (rec.accepted && rec.open) {
+                safeSend(rec.conn, { t: 'chat', text });
+                sent = true;
+            }
+        });
+
+        if (sent) {
+            appendChatMessage('You', text);
+            input.value = '';
+        } else {
+            showToast('Not connected to anyone!', 'warn');
+        }
+    };
+
+    document.getElementById('wp-chat-send').addEventListener('click', sendWpChat);
+    document.getElementById('wp-chat-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') sendWpChat();
+    });
 }
 
 function appendChatMessage(sender, text) {
+    // 1. Update Connect page chat log (if it exists)
     const log = document.getElementById('p2p-chat-log');
-    if (!log) return;
-    // Clear the placeholder text if it's the first message
-    if (log.firstElementChild && log.firstElementChild.style.fontStyle === 'italic') {
-        log.innerHTML = '';
+    if (log) {
+        if (log.firstElementChild && log.firstElementChild.style.fontStyle === 'italic') log.innerHTML = '';
+        const div = document.createElement('div');
+        div.style.wordBreak = 'break-word';
+        div.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
     }
-    const div = document.createElement('div');
-    div.style.wordBreak = 'break-word';
-    div.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
+
+    // 2. Update Watch panel chat log (if it exists)
+    const wpLog = document.getElementById('wp-chat-log');
+    if (wpLog) {
+        if (wpLog.firstElementChild && wpLog.firstElementChild.style.fontStyle === 'italic') wpLog.innerHTML = '';
+        const divWp = document.createElement('div');
+        divWp.style.wordBreak = 'break-word';
+        divWp.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
+        wpLog.appendChild(divWp);
+        wpLog.scrollTop = wpLog.scrollHeight;
+    }
 }
 
 function sendChatMessage() {
