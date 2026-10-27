@@ -1363,6 +1363,10 @@
             <span id="now-playing-title">Playing: Unknown</span>
         </div>
         <div class="toolbar-right">
+            <div id="emu-watcher-badge" class="hidden" style="display: flex; align-items: center; gap: 0.3rem; background: rgba(16,185,129,0.2); border: 1px solid rgba(16,185,129,0.4); padding: 0.25rem 0.6rem; border-radius: 9999px; font-size: 0.7rem; color: #34d399; font-weight: 600;">
+               <i data-lucide="eye" style="width: 0.8rem; height: 0.8rem;"></i>
+               <span id="emu-watcher-count">0 watching</span>
+            </div>
             <button id="btn-save-state" title="Save state now" class="toolbar-icon-btn">
                 <i data-lucide="save"></i>
             </button>
@@ -2633,6 +2637,21 @@ function applyPresence(rec, m) {
     if (f[rec.id] && nm && f[rec.id] !== nm) { f[rec.id] = nm; saveFriends(f); }
 }
 
+function updateWatcherUI() {
+    const badge = document.getElementById('emu-watcher-badge');
+    const countSpan = document.getElementById('emu-watcher-count');
+    if (!badge || !countSpan) return;
+
+    const count = P2P.watchers.size;
+    if (count > 0 && _p2pLive) {
+        badge.classList.remove('hidden');
+        countSpan.textContent = `${count} watching`;
+    } else {
+        badge.classList.add('hidden');
+    }
+    lucide.createIcons();
+}
+
 // ---- peer lifecycle ---------------------------------------------------------
 function setP2PStatus(state, text) {
     const el = document.getElementById('p2p-status');
@@ -2800,6 +2819,7 @@ function handleClose(conn) {
     if (!rec || rec.conn !== conn) return;
     P2P.conns.delete(id);
     P2P.watchers.delete(id);
+    if (P2P.watchers.delete(id)) updateWatcherUI();
     const call = P2P.calls.get(id);
     if (call) { try { call.close(); } catch (e) {} P2P.calls.delete(id); }
     if (P2P.watching === id) setWatchStatus(`${rec.name} disconnected. Waiting for them to come back…`);
@@ -2833,6 +2853,7 @@ function handleMsg(conn, msg) {
             break;
         case 'unwatch':
             P2P.watchers.delete(id);
+            updateWatcherUI();
             { const c = P2P.calls.get(id); if (c) { try { c.close(); } catch (e) {} P2P.calls.delete(id); } }
             break;
         case 'watch-denied':
@@ -2935,6 +2956,7 @@ function startCall(id) {
 function onWatchRequest(rec) {
     if (!_p2pShare) { safeSend(rec.conn, { t: 'watch-denied' }); return; }
     P2P.watchers.add(rec.id);
+    updateWatcherUI();
     if (!_p2pLive) { safeSend(rec.conn, { t: 'not-playing' }); return; }
     const c = P2P.calls.get(rec.id);
     if (c && c.open) return;
