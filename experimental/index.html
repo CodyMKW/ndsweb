@@ -904,10 +904,15 @@
 }
 #emulator-wrapper.active ~ #watch-panel { bottom: 1rem; }
 @media (min-width: 768px) { #watch-panel { bottom: 1rem; } }
-        #watch-panel.big {
-            width: min(960px, calc(100vw - 2rem));
-            right: 50%; bottom: 50%; transform: translate(50%, 50%);
-        }
+#watch-panel.big {
+    width: min(960px, calc(100vw - 2rem));
+    height: min(85vh, 700px); /* Gives it a structured height so elements don't get pushed off */
+    right: 50%; bottom: 50%; transform: translate(50%, 50%);
+    display: flex; flex-direction: column;
+}
+#watch-panel.big #wp-video {
+    max-height: calc(85vh - 180px); /* Scales the video nicely while leaving room for header and chat */
+}
         .wp-head {
             display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
             padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--white-5);
@@ -1401,9 +1406,9 @@
 
 <!-- ADD THIS CHAT BOX INSIDE THE WATCH PANEL -->
 <div style="padding: 0.5rem 0.75rem; background: rgba(15,15,20,0.95); border-top: 1px solid var(--white-5);">
-    <div id="wp-chat-log" style="height: 70px; overflow-y: auto; font-size: 0.75rem; margin-bottom: 0.4rem; display: flex; flex-direction: column; gap: 0.25rem;">
-       <div style="color: #6b7280; font-style: italic;">Chat ready...</div>
-    </div>
+<div id="wp-chat-log" style="height: 80px; flex: 1; min-height: 60px; overflow-y: auto; font-size: 0.75rem; margin-bottom: 0.4rem; display: flex; flex-direction: column; gap: 0.25rem;">
+    <div style="color: #6b7280; font-style: italic;">Chat ready...</div>
+</div>
     <div class="join-row" style="gap: 0.4rem;">
         <input type="text" id="wp-chat-input" class="text-input" placeholder="Type in stream chat..." style="font-size: 0.75rem; padding: 0.4rem 0.6rem;" autocomplete="off" />
         <button id="wp-chat-send" class="btn-accent" style="padding: 0.4rem 0.7rem; font-size: 0.75rem;"><i data-lucide="send" style="width:0.85rem;height:0.85rem;"></i></button>
@@ -3170,7 +3175,7 @@ function bindP2PUI() {
 }
 
 function appendChatMessage(sender, text) {
-    // 1. Update Connect page chat log (if it exists)
+    // 1. Connect page chat log
     const log = document.getElementById('p2p-chat-log');
     if (log) {
         if (log.firstElementChild && log.firstElementChild.style.fontStyle === 'italic') log.innerHTML = '';
@@ -3181,7 +3186,7 @@ function appendChatMessage(sender, text) {
         log.scrollTop = log.scrollHeight;
     }
 
-    // 2. Update Watch panel chat log (if it exists)
+    // 2. Watch panel chat log
     const wpLog = document.getElementById('wp-chat-log');
     if (wpLog) {
         if (wpLog.firstElementChild && wpLog.firstElementChild.style.fontStyle === 'italic') wpLog.innerHTML = '';
