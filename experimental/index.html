@@ -1376,6 +1376,10 @@
                 <i data-lucide="upload"></i>
             </button>
             <input type="file" id="sav-file-input" accept=".sav,.srm,.dsv,.bin" class="hidden" style="display:none">
+            <!-- ADD THIS NEW CHAT BUTTON -->
+            <button id="btn-emu-chat" title="Toggle chat" class="toolbar-icon-btn">
+               <i data-lucide="message-square"></i>
+            </button>
             <button id="btn-friends" title="Friends / watch" class="toolbar-icon-btn">
                 <i data-lucide="users"></i>
             </button>
@@ -1434,6 +1438,21 @@
 <div id="emu-friends" class="glass-panel hidden">
     <div class="ef-title">Friends online</div>
     <div id="emu-friends-list"></div>
+</div>
+
+<!-- In-game chat popup -->
+<div id="emu-chat-popup" class="glass-panel hidden" style="position: fixed; top: 3.75rem; right: 3.5rem; width: min(320px, calc(100vw - 1.5rem)); height: 320px; z-index: 130; border-radius: 1rem; padding: 0.9rem; background: rgba(26,26,36,0.96); display: flex; flex-direction: column;">
+    <div class="ef-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+        <span>In-Game Chat</span>
+        <button id="emu-chat-close" style="color: #9ca3af; cursor: pointer;"><i data-lucide="x" style="width: 1rem; height: 1rem;"></i></button>
+    </div>
+    <div id="emu-chat-log" style="flex: 1; overflow-y: auto; background: rgba(0,0,0,0.3); border: 1px solid var(--white-8); border-radius: 0.5rem; padding: 0.5rem; margin-bottom: 0.5rem; font-size: 0.75rem; display: flex; flex-direction: column; gap: 0.3rem;">
+        <div style="color: #6b7280; font-style: italic;">Chat ready...</div>
+    </div>
+    <div class="join-row" style="gap: 0.4rem;">
+        <input type="text" id="emu-chat-input" class="text-input" placeholder="Type message..." style="font-size: 0.75rem; padding: 0.4rem 0.6rem;" autocomplete="off" />
+        <button id="emu-chat-send" class="btn-accent" style="padding: 0.4rem 0.7rem; font-size: 0.75rem;"><i data-lucide="send" style="width:0.85rem;height:0.85rem;"></i></button>
+    </div>
 </div>
 
 <!-- Toast Container -->
@@ -3186,6 +3205,46 @@ function bindP2PUI() {
     document.getElementById('wp-chat-input').addEventListener('keydown', e => {
         if (e.key === 'Enter') sendWpChat();
     });
+
+// --- ADD THESE LINES INSIDE bindP2PUI() ---
+    const emuChatPopup = document.getElementById('emu-chat-popup');
+    
+    document.getElementById('btn-emu-chat').addEventListener('click', () => {
+        emuChatPopup.classList.toggle('hidden');
+        if (!emuChatPopup.classList.contains('hidden')) {
+            document.getElementById('emu-chat-input').focus();
+        }
+    });
+
+    document.getElementById('emu-chat-close').addEventListener('click', () => {
+        emuChatPopup.classList.add('hidden');
+    });
+
+    const sendEmuChat = () => {
+        const input = document.getElementById('emu-chat-input');
+        const text = input.value.trim();
+        if (!text) return;
+
+        let sent = false;
+        P2P.conns.forEach(rec => {
+            if (rec.accepted && rec.open) {
+                safeSend(rec.conn, { t: 'chat', text });
+                sent = true;
+            }
+        });
+
+        if (sent) {
+            appendChatMessage('You', text);
+            input.value = '';
+        } else {
+            showToast('Not connected to anyone!', 'warn');
+        }
+    };
+
+    document.getElementById('emu-chat-send').addEventListener('click', sendEmuChat);
+    document.getElementById('emu-chat-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') sendEmuChat();
+    });
 }
 
 function appendChatMessage(sender, text) {
@@ -3209,6 +3268,17 @@ function appendChatMessage(sender, text) {
         divWp.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
         wpLog.appendChild(divWp);
         wpLog.scrollTop = wpLog.scrollHeight;
+    }
+
+    // 3. Emulator In-Game chat log <--- ADD THIS BLOCK
+    const emuChatLog = document.getElementById('emu-chat-log');
+    if (emuChatLog) {
+        if (emuChatLog.firstElementChild && emuChatLog.firstElementChild.style.fontStyle === 'italic') emuChatLog.innerHTML = '';
+        const divEmu = document.createElement('div');
+        divEmu.style.wordBreak = 'break-word';
+        divEmu.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
+        emuChatLog.appendChild(divEmu);
+        emuChatLog.scrollTop = emuChatLog.scrollHeight;
     }
 }
 
