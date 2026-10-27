@@ -1111,6 +1111,18 @@
                     </div>
 
                 </div>
+
+<!-- CHAT PANEL -->
+<div class="glass-panel settings-panel span-2">
+    <h3><i data-lucide="message-square"></i> Chat</h3>
+    <div id="p2p-chat-log" style="height: 180px; overflow-y: auto; background: rgba(0,0,0,0.3); border: 1px solid var(--white-8); border-radius: 0.75rem; padding: 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem;">
+        <div style="color: #6b7280; text-align: center; font-style: italic;">Connect with a friend to start chatting.</div>
+    </div>
+    <div class="join-row">
+        <input type="text" id="p2p-chat-input" class="text-input" placeholder="Type a message…" autocomplete="off" />
+        <button id="p2p-chat-send" class="btn-accent"><i data-lucide="send" style="width:1rem;height:1rem;"></i> Send</button>
+    </div>
+</div>
             </div>
 
             <!-- SETTINGS VIEW -->
@@ -2756,6 +2768,9 @@ function handleMsg(conn, msg) {
             applyPresence(rec, msg);
             afterPresence(id);
             break;
+        case 'chat':                                        
+            appendChatMessage(rec.name || 'Friend', msg.text); 
+            break;                                           
         case 'denied': {
             const f = loadFriends(); delete f[id]; saveFriends(f);
             showToast(`${escHtml(rec.name)} declined your request.`, 'info');
@@ -3109,6 +3124,42 @@ function bindP2PUI() {
     });
 }
 
+function appendChatMessage(sender, text) {
+    const log = document.getElementById('p2p-chat-log');
+    if (!log) return;
+    // Clear the placeholder text if it's the first message
+    if (log.firstElementChild && log.firstElementChild.style.fontStyle === 'italic') {
+        log.innerHTML = '';
+    }
+    const div = document.createElement('div');
+    div.style.wordBreak = 'break-word';
+    div.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+}
+
+function sendChatMessage() {
+    const input = document.getElementById('p2p-chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    let sent = false;
+    // Broadcast chat to all active accepted connections
+    P2P.conns.forEach(rec => {
+        if (rec.accepted && rec.open) {
+            safeSend(rec.conn, { t: 'chat', text });
+            sent = true;
+        }
+    });
+
+    if (sent) {
+        appendChatMessage('You', text);
+        input.value = '';
+    } else {
+        showToast('Connect to a friend first!', 'warn');
+    }
+}
+
 function initP2P() {
     bindP2PUI();
     renderFriends();
@@ -3152,6 +3203,10 @@ window.onload = async () => {
     document.getElementById('sort-select').value = savedSort;
     document.getElementById('sort-select').addEventListener('change', e => {
         localStorage.setItem('ndsweb_sort', e.target.value);
+   // --- ADD THESE LINES INSIDE bindP2PUI() ---
+    document.getElementById('p2p-chat-send').addEventListener('click', sendChatMessage);
+    document.getElementById('p2p-chat-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') sendChatMessage();
     });
 };
 </script>
