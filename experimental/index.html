@@ -893,15 +893,17 @@
         .mini-btn .lucide { width: 0.875rem; height: 0.875rem; }
 
         /* Watch panel */
-        #watch-panel {
-            position: fixed; right: 1rem; bottom: 5.5rem;
-            width: min(340px, calc(100vw - 2rem));
-            z-index: 120; border-radius: 1rem; overflow: hidden;
-            box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-            background: rgba(15,15,20,0.92);
-        }
-        #emulator-wrapper.active ~ #watch-panel { bottom: 1rem; }
-        @media (min-width: 768px) { #watch-panel { bottom: 1rem; } }
+#watch-panel {
+    position: fixed; right: 1rem; bottom: 5rem;
+    width: min(340px, calc(100vw - 2rem));
+    max-height: calc(100vh - 7rem); /* Prevents it from going off the bottom of the screen */
+    display: flex; flex-direction: column;
+    z-index: 120; border-radius: 1rem; overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    background: rgba(15,15,20,0.95);
+}
+#emulator-wrapper.active ~ #watch-panel { bottom: 1rem; }
+@media (min-width: 768px) { #watch-panel { bottom: 1rem; } }
         #watch-panel.big {
             width: min(960px, calc(100vw - 2rem));
             right: 50%; bottom: 50%; transform: translate(50%, 50%);
