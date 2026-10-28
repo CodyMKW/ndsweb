@@ -3594,7 +3594,7 @@ async function dcWorker(path, body) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    if (!r.ok) throw new Error((j.error || ('HTTP ' + r.status)) + (j.status ? ' [Discord ' + j.status + ']' : '') + (j.detail ? ': ' + j.detail : ''));
     return j;
 }
 
@@ -3677,6 +3677,7 @@ function dcSendPresence() {
 }
 
 async function dcConnect() {
+    console.info('[Discord] connecting to gateway');
     if (_dc.ws || !dcTokens()) return;
     const tok = await dcEnsureToken();
     if (!tok || _dc.ws) { dcRenderStatus(); return; }
@@ -3693,6 +3694,7 @@ async function dcConnect() {
             const iv = m.d.heartbeat_interval;
             clearInterval(_dc.hb);
             setTimeout(() => { if (_dc.ws === ws) { dcBeat(); _dc.hb = setInterval(dcBeat, iv); } }, iv * Math.random());
+            console.info('[Discord] gateway hello, identifying', bearer ? '(Bearer prefix)' : '(raw token)');
             ws.send(JSON.stringify({ op: 2, d: {
                 token: bearer ? 'Bearer ' + tok : tok,
                 intents: 0,
@@ -3701,9 +3703,10 @@ async function dcConnect() {
             } }));
         } else if (m.op === 1)  { dcBeat(); }
         else if (m.op === 7 || m.op === 9) { ws.close(); }
-        else if (m.op === 0 && m.t === 'READY') { _dc.ready = true; _dc.retry = 0; dcSendPresence(); dcRenderStatus(); }
+        else if (m.op === 0 && m.t === 'READY') { _dc.ready = true; _dc.retry = 0; console.info('[Discord] gateway READY, sending presence', _dc.activity); dcSendPresence(); dcRenderStatus(); }
     };
     ws.onclose = ev => {
+        console.info('[Discord] gateway closed', ev.code, ev.reason || '(no reason)');
         clearInterval(_dc.hb);
         if (_dc.ws === ws) { _dc.ws = null; _dc.ready = false; }
         dcRenderStatus();
