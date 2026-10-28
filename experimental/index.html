@@ -3752,6 +3752,7 @@ function discordStop() {
 function dcImageLoads(url) {
     return new Promise(res => {
         const img = new Image();
+        img.referrerPolicy = 'no-referrer';                 // some image hosts reject hotlinks that send a referrer
         const t = setTimeout(() => res(false), 4000);
         img.onload  = () => { clearTimeout(t); res(true); };
         img.onerror = () => { clearTimeout(t); res(false); };
@@ -3778,9 +3779,13 @@ async function discordOnGameStart(gameName) {
         const rom = await getROM(gameName);
         const url = (rom && rom.customCover)
             || `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(clean)}.png`;
-        if (_dc.game !== gameName || !/^https:\/\//i.test(url)) return;
-        if (!(await dcImageLoads(url))) return;
+        console.info('[Discord] cover art url:', url);
+        if (_dc.game !== gameName) { console.info('[Discord] cover skipped: game changed'); return; }
+        if (!/^https:\/\//i.test(url)) { console.info('[Discord] cover skipped: not an https URL'); return; }
+        // Your own custom cover is trusted; only pre-check the auto-guessed box art (it often 404s)
+        if (!(rom && rom.customCover) && !(await dcImageLoads(url))) { console.info('[Discord] cover skipped: default box art not found'); return; }
         const j = await dcWorker('/asset', { url });
+        console.info('[Discord] cover resolved:', j.path);
         if (_dc.game === gameName && _dc.activity && j.path) {
             _dc.activity.assets.large_image = j.path;
             dcSendPresence();
