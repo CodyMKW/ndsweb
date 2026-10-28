@@ -3784,10 +3784,18 @@ async function discordOnGameStart(gameName) {
         if (!/^https:\/\//i.test(url)) { console.info('[Discord] cover skipped: not an https URL'); return; }
         // Your own custom cover is trusted; only pre-check the auto-guessed box art (it often 404s)
         if (!(rom && rom.customCover) && !(await dcImageLoads(url))) { console.info('[Discord] cover skipped: default box art not found'); return; }
-        const j = await dcWorker('/asset', { url });
-        console.info('[Discord] cover resolved:', j.path);
-        if (_dc.game === gameName && _dc.activity && j.path) {
-            _dc.activity.assets.large_image = j.path;
+        let path = null;
+        try {
+            const j = await dcWorker('/asset', { url, token: await dcEnsureToken() });
+            path = j.path;
+            console.info('[Discord] cover resolved:', path);
+        } catch (e) {
+            // Discord may also accept a plain https URL as the image; harmless if it doesn't
+            console.warn('[Discord] cover resolve failed, trying the raw URL:', e.message);
+            path = url;
+        }
+        if (_dc.game === gameName && _dc.activity && path) {
+            _dc.activity.assets.large_image = path;
             dcSendPresence();
         }
     } catch (e) { console.warn('Discord cover art skipped:', e); }
