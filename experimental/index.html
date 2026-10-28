@@ -5,17 +5,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>NDSWeb — Play NDS, GBA, &amp; Retro Games in Your Browser</title>
-    <meta name="description" content="Play your favorite Nintendo DS, GBA, GB, and GBC games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
+    <meta name="description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, and SNES games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
 
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://codymkw.nekoweb.org/emulator">
     <meta property="og:title" content="NDSWeb — Play NDS, GBA, &amp; Retro Games in Your Browser">
-    <meta property="og:description" content="Play your favorite Nintendo DS, GBA, GB, and GBC games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
+    <meta property="og:description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, and SNES games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
     <meta property="og:image" content="/assets/images/controller.png">
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="https://codymkw.nekoweb.org/emulator">
     <meta property="twitter:title" content="NDSWeb — Play NDS, GBA, &amp; Retro Games in Your Browser">
-    <meta property="twitter:description" content="Play your favorite Nintendo DS, GBA, GB, and GBC games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
+    <meta property="twitter:description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, and SNES games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
     <meta property="twitter:image" content="/assets/images/controller.png">
 
     <script src="https://unpkg.com/lucide@0.383.0/dist/umd/lucide.min.js"></script>
@@ -1021,9 +1021,9 @@
                             <i data-lucide="upload-cloud" class="dz-icon"></i>
                         </div>
                         <p class="dz-main-text"><strong>Tap to browse</strong> or drag &amp; drop</p>
-                        <p class="dz-sub-text">Supported: .nds, .gba, .gb, .gbc</p>
+                        <p class="dz-sub-text">Supported: .nds, .gba, .gb, .gbc, .nes, .sfc</p>
                     </div>
-                    <input type="file" id="file-input" accept=".nds,.gba,.gb,.gbc" />
+                    <input type="file" id="file-input" accept=".nds,.gba,.gb,.gbc,.nes,.sfc" />
                 </label>
 
                 <div class="section-header">
@@ -1979,7 +1979,7 @@ async function downloadSav() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = _currentGameName.replace(/\.(nds|gba|gb|gbc)$/i, '') + '.sav';
+    a.download = _currentGameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '') + '.sav';
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast('Save downloaded.', 'success');
@@ -2158,6 +2158,8 @@ function getConsoleInfo(filename) {
     if (lower.endsWith('.gba')) return { consoleName: 'Game Boy Advance', badge: 'GBA', icon: 'gamepad', system: 'Nintendo - Game Boy Advance' };
     if (lower.endsWith('.gbc')) return { consoleName: 'Game Boy Color',   badge: 'GBC', icon: 'gamepad', system: 'Nintendo - Game Boy Color' };
     if (lower.endsWith('.gb'))  return { consoleName: 'Game Boy',         badge: 'GB',  icon: 'gamepad', system: 'Nintendo - Game Boy' };
+    if (lower.endsWith('.nes')) return { consoleName: 'Nintendo Entertainment System', badge: 'NES', icon: 'gamepad-2', system: 'Nintendo - Nintendo Entertainment System' };
+    if (lower.endsWith('.sfc')) return { consoleName: 'Super Nintendo',   badge: 'SNES', icon: 'gamepad-2', system: 'Nintendo - Super Nintendo Entertainment System' };
     return                            { consoleName: 'Nintendo DS',        badge: 'NDS', icon: 'tablet-smartphone', system: 'Nintendo - Nintendo DS' };
 }
 
@@ -2186,7 +2188,7 @@ function createGameCard(rom, hasSave = false) {
 
     const grad      = CARD_GRADS[Math.abs(rom.name.split('').reduce((h,c) => h * 31 + c.charCodeAt(0), 0)) % CARD_GRADS.length];
     const info      = getConsoleInfo(rom.name);
-    const cleanName = rom.name.replace(/\.(nds|gba|gb|gbc)$/i, '');
+    const cleanName = rom.name.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
     const coverUrl  = rom.customCover
         || `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(cleanName)}.png`;
 
@@ -2365,8 +2367,8 @@ fileInput.addEventListener('change', e => { handleFiles(e.target.files); e.targe
 async function handleFiles(files) {
     if (!files.length) return;
     const file  = files[0];
-    const valid = ['.nds','.gba','.gb','.gbc'].some(ext => file.name.toLowerCase().endsWith(ext));
-    if (!valid) { showToast('Please upload a valid .nds, .gba, .gb, or .gbc file.', 'error'); return; }
+    const valid = ['.nds','.gba','.gb','.gbc','.nes','.sfc'].some(ext => file.name.toLowerCase().endsWith(ext));
+    if (!valid) { showToast('Please upload a valid .nds, .gba, .gb, .gbc, .nes, or .sfc file.', 'error'); return; }
     try {
         await saveROM(file);
         await renderLibrary();
@@ -2468,6 +2470,8 @@ async function launchEmulator(file, gameName) {
     let coreName = 'nds', coreDisplayName = 'melonDS';
     if (lower.endsWith('.gba'))                        { coreName = 'gba'; coreDisplayName = 'mGBA';     }
     else if (lower.endsWith('.gb') || lower.endsWith('.gbc')) { coreName = 'gb';  coreDisplayName = 'Gambatte'; }
+    else if (lower.endsWith('.nes'))                   { coreName = 'nes';  coreDisplayName = 'FCEUmm'; }
+    else if (lower.endsWith('.sfc'))                   { coreName = 'snes'; coreDisplayName = 'Snes9x';  }
 
     _currentGameName = gameName;
     _lastSaveData    = null;
@@ -2532,13 +2536,13 @@ async function launchEmulator(file, gameName) {
 
     const emuWrapper = document.getElementById('emulator-wrapper');
     emuWrapper.classList.add('active');
-    document.getElementById('now-playing-title').textContent = gameName.replace(/\.(nds|gba|gb|gbc)$/i, '');
+    document.getElementById('now-playing-title').textContent = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
 
     const gameUrl = trackURL(URL.createObjectURL(file));
 
     window.EJS_player        = '#game-container';
     window.EJS_core          = coreName;
-    window.EJS_gameName      = gameName.replace(/\.(nds|gba|gb|gbc)$/i, '');
+    window.EJS_gameName      = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
     window.EJS_color         = window._accentHex || '#10b981';
     window.EJS_startOnLoaded = true;
     window.EJS_pathtodata    = 'https://cdn.emulatorjs.org/stable/data/';
@@ -2979,7 +2983,7 @@ function setShare(on) {
 function p2pOnGameStart(gameName) {
     if (_p2pStartedFor === gameName) return;
     _p2pStartedFor = gameName;
-    _p2pLive  = gameName.replace(/\.(nds|gba|gb|gbc)$/i, '');
+    _p2pLive  = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
     _p2pBadge = getConsoleInfo(gameName).badge;
     broadcastPresence();
     if (_p2pShare) P2P.watchers.forEach(id => startCall(id));
