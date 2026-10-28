@@ -949,6 +949,8 @@
         }
         #wp-status.hidden { display: none; }
 
+        #wp-control.active { background: var(--accent-bg); color: var(--accent); }
+
         /* In-game friends popup */
         #emu-friends {
             position: fixed; top: 3.75rem; right: 0.75rem;
@@ -1113,6 +1115,14 @@
                                 <button class="seg-btn" data-share="0">Off</button>
                             </div>
                             <p class="p2p-note">Only friends you've accepted can watch, and only while a game is running.</p>
+                        </div>
+                        <div class="settings-section">
+                            <p class="settings-label">Let a watching friend play as Player 2</p>
+                            <div class="seg-ctrl" id="control-toggles">
+                                <button class="seg-btn" data-ctl="1">On</button>
+                                <button class="seg-btn" data-ctl="0">Off</button>
+                            </div>
+                            <p class="p2p-note">For 2-player NES / SNES games. Your friend watches your stream and sends their controller to you. Their button presses only count while you leave this on and your tab stays open.</p>
                         </div>
                     </div>
 
@@ -1415,6 +1425,7 @@
     <div class="wp-head">
         <span class="wp-title" id="wp-title">Friend's game</span>
         <div class="wp-btns">
+            <button id="wp-control" title="Play as Player 2 (needs host permission)"><i data-lucide="gamepad-2"></i></button>
             <button id="wp-mute" title="Mute / unmute"><i data-lucide="volume-2"></i></button>
             <button id="wp-size" title="Enlarge / shrink"><i data-lucide="maximize-2"></i></button>
             <button id="wp-fs" title="Fullscreen"><i data-lucide="maximize"></i></button>
@@ -2596,6 +2607,7 @@ let _p2pLive       = null;   // clean name of the game I'm running (null when id
 let _p2pBadge      = '';
 let _p2pStartedFor = null;
 let _p2pShare      = localStorage.getItem('ndsweb_p2p_share') !== '0';
+let _p2pControl    = localStorage.getItem('ndsweb_p2p_control') === '1';
 
 const ID_RE = /^[A-Za-z0-9_-]{3,64}$/;
 const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -2818,6 +2830,7 @@ function registerConn(conn, incoming) {
 }
 
 function handleClose(conn) {
+    releaseGuest(conn.peer);
     const id  = conn.peer;
     const rec = P2P.conns.get(id);
     if (!rec || rec.conn !== conn) return;
@@ -2846,6 +2859,12 @@ function handleMsg(conn, msg) {
         case 'chat':                                        
             appendChatMessage(rec.name || 'Friend', msg.text); 
             break;                                           
+        case 'ctl-req':     if (rec.accepted) onCtlRequest(rec); break;
+        case 'in':          if (rec.accepted) onGuestInput(rec, msg); break;
+        case 'ctl-release': releaseGuest(id); break;
+        case 'ctl-ok':      if (P2P.watching === id) { _ctl.on = true; syncCtlBtn(); showToast('You are Player 2! Arrows + Z/X/A/S/Q/E, Enter = Start, Shift = Select.', 'success', 5000); } break;
+        case 'ctl-denied':  if (P2P.watching === id) { stopControl(false); showToast(({ off: `${escHtml(rec.name)} hasn't enabled Player 2.`, taken: 'Someone is already Player 2.', idle: 'They are not sharing a game right now.' })[msg.why] || 'Control request declined.', 'warn'); } break;
+        case 'ctl-revoked': if (P2P.watching === id) { stopControl(false); showToast('The host turned off Player 2 control.', 'info'); } break;
         case 'denied': {
             const f = loadFriends(); delete f[id]; saveFriends(f);
             showToast(`${escHtml(rec.name)} declined your request.`, 'info');
@@ -2856,6 +2875,7 @@ function handleMsg(conn, msg) {
             if (rec.accepted) onWatchRequest(rec);
             break;
         case 'unwatch':
+            releaseGuest(id);
             P2P.watchers.delete(id);
             updateWatcherUI();
             { const c = P2P.calls.get(id); if (c) { try { c.close(); } catch (e) {} P2P.calls.delete(id); } }
@@ -3034,6 +3054,7 @@ function showStream(stream) {
     });
 }
 function watchFriend(id) {
+    stopControl(true);
     const rec = P2P.conns.get(id);
     if (!rec || !rec.accepted) return;
     if (!rec.playing || !rec.sharing) { showToast(`${escHtml(rec.name)} isn't sharing a game right now.`, 'warn'); return; }
@@ -3049,6 +3070,7 @@ function watchFriend(id) {
     document.getElementById('emu-friends').classList.add('hidden');
 }
 function closeWatchPanel(notify = true) {
+    stopControl(notify);
     const id = P2P.watching;
     if (notify && id) { const rec = P2P.conns.get(id); if (rec) safeSend(rec.conn, { t: 'unwatch' }); }
     P2P.watching = null;
@@ -3057,6 +3079,124 @@ function closeWatchPanel(notify = true) {
     v.srcObject = null;
     document.getElementById('watch-panel').classList.add('hidden');
     document.getElementById('watch-panel').classList.remove('big');
+}
+
+// ---- Player 2 over the stream ------------------------------------------------
+// Host runs the game and streams it (above). A watching friend can send their
+// controller back; the host feeds it to the core as player 2 (index 1).
+// Button ids follow libretro's joypad layout: 0 B,1 Y,2 Select,3 Start,4 Up,5 Down,
+// 6 Left,7 Right,8 A,9 X,10 L,11 R.
+P2P.guest = null;                 // host side: friend currently acting as Player 2
+P2P.guestHeld = new Set();
+const _ctl = { on: false, held: new Set(), pad: new Set() };
+const CTL_KEYS = { ArrowUp:4, ArrowDown:5, ArrowLeft:6, ArrowRight:7, KeyZ:8, KeyX:0, KeyA:9, KeyS:1, KeyQ:10, KeyE:11, Enter:3, ShiftLeft:2, ShiftRight:2 };
+const CTL_PAD  = { 0:0, 1:8, 2:1, 3:9, 4:10, 5:11, 8:2, 9:3, 12:4, 13:5, 14:6, 15:7 };   // standard gamepad -> libretro
+
+// host side
+function p2pSim(idx, val) {
+    const emu = getEmu();
+    if (!emu) return;
+    try { emu.gameManager.simulateInput(1, idx, val); } catch (e) { console.warn('simulateInput failed', e); }
+}
+function onCtlRequest(rec) {
+    const deny = why => safeSend(rec.conn, { t: 'ctl-denied', why });
+    if (!_p2pControl) return deny('off');
+    if (!_p2pLive || !P2P.watchers.has(rec.id)) return deny('idle');
+    if (P2P.guest && P2P.guest !== rec.id && P2P.conns.has(P2P.guest)) return deny('taken');
+    P2P.guest = rec.id;
+    safeSend(rec.conn, { t: 'ctl-ok' });
+    showToast(`${escHtml(rec.name)} is now Player 2.`, 'info');
+}
+function onGuestInput(rec, m) {
+    if (!_p2pControl || P2P.guest !== rec.id) return;
+    const i = Number(m.i);
+    if (!Number.isInteger(i) || i < 0 || i > 15) return;
+    const v = m.v ? 1 : 0;
+    if (v) P2P.guestHeld.add(i); else P2P.guestHeld.delete(i);
+    p2pSim(i, v);
+}
+function releaseGuest(id) {
+    if (P2P.guest !== id) return;
+    P2P.guestHeld.forEach(i => p2pSim(i, 0));
+    P2P.guestHeld.clear();
+    P2P.guest = null;
+}
+function setControl(on) {
+    _p2pControl = on;
+    localStorage.setItem('ndsweb_p2p_control', on ? '1' : '0');
+    document.querySelectorAll('#control-toggles .seg-btn').forEach(b => b.classList.toggle('active', (b.dataset.ctl === '1') === on));
+    if (!on && P2P.guest) {
+        const rec = P2P.conns.get(P2P.guest);
+        if (rec) safeSend(rec.conn, { t: 'ctl-revoked' });
+        releaseGuest(P2P.guest);
+    }
+}
+
+// guest side
+function sendCtl(msg) {
+    const rec = P2P.watching && P2P.conns.get(P2P.watching);
+    if (rec) safeSend(rec.conn, msg);
+}
+function syncCtlBtn() {
+    const b = document.getElementById('wp-control');
+    if (b) { b.classList.toggle('active', _ctl.on); b.title = _ctl.on ? 'Stop playing as Player 2' : 'Play as Player 2 (needs host permission)'; }
+}
+function stopControl(notify) {
+    if (_ctl.on) {
+        _ctl.held.forEach(i => sendCtl({ t: 'in', i, v: 0 }));
+        if (notify) sendCtl({ t: 'ctl-release' });
+    }
+    _ctl.on = false; _ctl.held.clear(); _ctl.pad.clear();
+    syncCtlBtn();
+}
+function toggleControl() {
+    if (_ctl.on) { stopControl(true); return; }
+    if (!P2P.watching) { showToast('Watch a friend\'s game first.', 'warn'); return; }
+    if (_p2pLive) showToast('Your own game is running too, so these keys will go to both.', 'warn', 5000);
+    sendCtl({ t: 'ctl-req' });
+}
+function ctlPress(i, v) {
+    if (!_ctl.on) return;
+    if (v && _ctl.held.has(i)) return;
+    if (!v && !_ctl.held.has(i)) return;
+    if (v) _ctl.held.add(i); else _ctl.held.delete(i);
+    sendCtl({ t: 'in', i, v });
+}
+document.addEventListener('keydown', e => {
+    if (!_ctl.on || e.repeat) return;
+    if (e.target && e.target.matches && e.target.matches('input, textarea, select')) return;
+    const i = CTL_KEYS[e.code];
+    if (i === undefined) return;
+    e.preventDefault();
+    ctlPress(i, 1);
+});
+document.addEventListener('keyup', e => {
+    if (!_ctl.on) return;
+    const i = CTL_KEYS[e.code];
+    if (i === undefined) return;
+    ctlPress(i, 0);
+});
+window.addEventListener('blur', () => { [..._ctl.held].forEach(i => ctlPress(i, 0)); });
+(function padLoop() {
+    if (_ctl.on && navigator.getGamepads) {
+        const down = new Set();
+        for (const gp of navigator.getGamepads()) {
+            if (!gp) continue;
+            gp.buttons.forEach((b, n) => { if (b.pressed && CTL_PAD[n] !== undefined) down.add(CTL_PAD[n]); });
+            const [ax, ay] = [gp.axes[0] || 0, gp.axes[1] || 0];
+            if (ax < -0.5) down.add(6); if (ax > 0.5) down.add(7);
+            if (ay < -0.5) down.add(4); if (ay > 0.5) down.add(5);
+        }
+        down.forEach(i => { if (!_ctl.pad.has(i)) { _ctl.pad.add(i); ctlPress(i, 1); } });
+        [..._ctl.pad].forEach(i => { if (!down.has(i)) { _ctl.pad.delete(i); ctlPress(i, 0); } });
+    }
+    requestAnimationFrame(padLoop);
+})();
+function bindControlUI() {
+    document.querySelectorAll('#control-toggles .seg-btn').forEach(b =>
+        b.addEventListener('click', () => setControl(b.dataset.ctl === '1')));
+    setControl(_p2pControl);
+    document.getElementById('wp-control').addEventListener('click', toggleControl);
 }
 
 // ---- friends list UI --------------------------------------------------------
@@ -3268,6 +3408,7 @@ function bindP2PUI() {
     };
 
     document.getElementById('emu-chat-send').addEventListener('click', sendEmuChat);
+    bindControlUI();
     document.getElementById('emu-chat-input').addEventListener('keydown', e => {
         if (e.key === 'Enter') sendEmuChat();
     });
