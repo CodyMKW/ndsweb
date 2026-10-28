@@ -1245,6 +1245,27 @@
                         </p>
                     </div>
 
+                    <!-- Discord presence -->
+                    <div class="glass-panel settings-panel">
+                        <h3>
+                            <i data-lucide="message-circle"></i> Discord Presence
+                            <span id="dc-status" class="p2p-status offline"><span class="p2p-dot"></span><span id="dc-status-text">Not connected</span></span>
+                        </h3>
+                        <p style="font-size:0.8125rem;color:#9ca3af;margin-bottom:1rem;">Show the game you're playing on your Discord profile while NDSWeb is open, with its cover art when available.</p>
+                        <div class="settings-section">
+                            <p class="settings-label">Show what I'm playing</p>
+                            <div class="seg-ctrl" id="dc-toggles">
+                                <button class="seg-btn" data-dc="1">On</button>
+                                <button class="seg-btn" data-dc="0">Off</button>
+                            </div>
+                        </div>
+                        <div class="btn-row">
+                            <button id="dc-connect" class="btn-accent"><i data-lucide="link" style="width:1rem;height:1rem;"></i> Connect Discord</button>
+                            <button id="dc-disconnect" class="btn-danger hidden"><i data-lucide="unlink" style="width:1rem;height:1rem;"></i> Disconnect</button>
+                        </div>
+                        <p class="p2p-note">Discord's consent screen lists a few extra permissions (they come bundled with the presence scope). NDSWeb only uses presence.</p>
+                    </div>
+
                     <!-- Storage -->
                     <div class="glass-panel settings-panel">
                         <h3><i data-lucide="hard-drive"></i> Local Storage</h3>
@@ -1933,7 +1954,7 @@ async function beginSaveSync(gameName) {
 // Called by EmulatorJS (and by a fallback poller below)
 function onEmulatorStarted(gameName) {
     // give the core a moment to finish booting before we touch its filesystem
-    setTimeout(() => { beginSaveSync(gameName); if (typeof p2pOnGameStart === 'function') p2pOnGameStart(gameName); }, 1200);
+    setTimeout(() => { beginSaveSync(gameName); if (typeof p2pOnGameStart === 'function') p2pOnGameStart(gameName); if (typeof discordOnGameStart === 'function') discordOnGameStart(gameName); }, 1200);
 }
 
 function stopSaveSync() {
@@ -2440,6 +2461,7 @@ function trackURL(url) {
 // QUIT — saves state first, then returns to launcher
 // ─────────────────────────────────────────────────────────────
 async function quitEmulator() {
+    try { discordStop(); } catch(e) { /* non-fatal */ }
     // Flush the game's real save first, then wait for IndexedDB before reloading
     try { await flushSave({ force: true }); } catch(e) { /* non-fatal */ }
     stopSaveSync();
@@ -3542,6 +3564,231 @@ window.addEventListener('pagehide', () => { try { if (P2P.peer) P2P.peer.destroy
 // ─────────────────────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// DISCORD PRESENCE
+//  * OAuth2 (scope: openid sdk.social_layer_presence) -> the Worker swaps the
+//    code for tokens (it holds the client secret).
+//  * While a game runs, this page opens Discord's gateway with the user's token
+//    and sends a presence update (the same thing the Social SDK does).
+//  * Cover art: the Worker turns an image URL into a Discord external asset.
+// ─────────────────────────────────────────────────────────────
+const DISCORD_APP_ID     = '1564877675531603988';
+const DISCORD_WORKER_URL = 'https://ndsweb-helper.codymkw.workers.dev/';
+
+const _dc = { ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null };
+
+const dcConfigured = () => !/^YOUR_/.test(DISCORD_APP_ID) && !/YOUR-WORKER/.test(DISCORD_WORKER_URL);
+const dcEnabled    = () => localStorage.getItem('ndsweb_dc_on') !== '0';
+function dcTokens() { try { return JSON.parse(localStorage.getItem('ndsweb_dc_tokens') || 'null'); } catch (e) { return null; } }
+function dcSaveTokens(j, old) {
+    localStorage.setItem('ndsweb_dc_tokens', JSON.stringify({
+        access_token:  j.access_token,
+        refresh_token: j.refresh_token || (old && old.refresh_token) || null,
+        expires_at:    Date.now() + (Number(j.expires_in) || 3600) * 1000
+    }));
+}
+function dcClearTokens() { localStorage.removeItem('ndsweb_dc_tokens'); localStorage.removeItem('ndsweb_dc_bearer'); }
+
+async function dcWorker(path, body) {
+    const r = await fetch(DISCORD_WORKER_URL.replace(/\/$/, '') + path, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    return j;
+}
+
+function dcRenderStatus() {
+    const el = document.getElementById('dc-status');
+    if (!el) return;
+    const t = dcTokens();
+    let state = 'offline', text = 'Not connected';
+    if (!dcConfigured())      text = 'Not configured';
+    else if (t && _dc.ready && _dc.activity) { state = 'online'; text = 'Showing: ' + _dc.activity.name; }
+    else if (t && _dc.ws)     { state = 'connecting'; text = 'Connecting…'; }
+    else if (t)               { state = 'online'; text = dcEnabled() ? 'Connected' : 'Connected (hidden)'; }
+    el.className = 'p2p-status ' + state;
+    document.getElementById('dc-status-text').textContent = text;
+    document.getElementById('dc-connect').classList.toggle('hidden', !!t);
+    document.getElementById('dc-disconnect').classList.toggle('hidden', !t);
+    document.querySelectorAll('#dc-toggles .seg-btn').forEach(b => b.classList.toggle('active', (b.dataset.dc === '1') === dcEnabled()));
+}
+
+// ---- OAuth -----------------------------------------------------------------
+function dcStartAuth() {
+    if (!dcConfigured()) { showToast('Set DISCORD_APP_ID and DISCORD_WORKER_URL in the page first.', 'warn', 6000); return; }
+    const state = 'dc_' + Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
+    sessionStorage.setItem('ndsweb_dc_state', state);
+    const url = 'https://discord.com/oauth2/authorize?' + new URLSearchParams({
+        client_id: DISCORD_APP_ID, response_type: 'code',
+        scope: 'openid sdk.social_layer_presence',
+        redirect_uri: location.origin + location.pathname,
+        state, prompt: 'consent'
+    });
+    location.href = url;
+}
+
+async function dcHandleRedirect() {
+    const u = new URL(location.href);
+    const state = u.searchParams.get('state');
+    if (!state || state.indexOf('dc_') !== 0) return;          // not a Discord redirect
+    const code = u.searchParams.get('code'), err = u.searchParams.get('error');
+    ['code', 'state', 'error', 'error_description'].forEach(k => u.searchParams.delete(k));
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+    switchView('settings');
+    if (err) { showToast('Discord connection was cancelled.', 'info'); return; }
+    if (!code || state !== sessionStorage.getItem('ndsweb_dc_state')) { showToast('Discord login could not be verified. Try again.', 'error'); return; }
+    sessionStorage.removeItem('ndsweb_dc_state');
+    try {
+        const j = await dcWorker('/token', { code, redirect_uri: location.origin + location.pathname });
+        dcSaveTokens(j);
+        showToast('Discord connected!', 'success');
+    } catch (e) {
+        console.warn(e);
+        showToast('Discord login failed: ' + escHtml(e.message), 'error', 7000);
+    }
+    dcRenderStatus();
+}
+
+async function dcEnsureToken() {
+    const t = dcTokens();
+    if (!t) return null;
+    if (t.expires_at - 60000 > Date.now()) return t.access_token;
+    try {
+        const j = await dcWorker('/token', { refresh_token: t.refresh_token });
+        dcSaveTokens(j, t);
+        return j.access_token;
+    } catch (e) {
+        console.warn('Discord token refresh failed', e);
+        if (/invalid_grant/.test(e.message)) { dcClearTokens(); showToast('Discord session expired. Reconnect in Settings.', 'warn', 6000); }
+        return null;
+    }
+}
+
+// ---- Gateway -----------------------------------------------------------------
+function dcBeat() {
+    if (_dc.ws && _dc.ws.readyState === 1) _dc.ws.send(JSON.stringify({ op: 1, d: _dc.seq }));
+}
+function dcPresencePayload() {
+    return { since: null, activities: _dc.activity ? [_dc.activity] : [], status: 'online', afk: false };
+}
+function dcSendPresence() {
+    if (_dc.ws && _dc.ws.readyState === 1 && _dc.ready) _dc.ws.send(JSON.stringify({ op: 3, d: dcPresencePayload() }));
+}
+
+async function dcConnect() {
+    if (_dc.ws || !dcTokens()) return;
+    const tok = await dcEnsureToken();
+    if (!tok || _dc.ws) { dcRenderStatus(); return; }
+    _dc.closing = false; _dc.ready = false; _dc.seq = null;
+    const bearer = localStorage.getItem('ndsweb_dc_bearer') === '1';
+    const ws = new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json');
+    _dc.ws = ws;
+    dcRenderStatus();
+
+    ws.onmessage = ev => {
+        let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m.s != null) _dc.seq = m.s;
+        if (m.op === 10) {
+            const iv = m.d.heartbeat_interval;
+            clearInterval(_dc.hb);
+            setTimeout(() => { if (_dc.ws === ws) { dcBeat(); _dc.hb = setInterval(dcBeat, iv); } }, iv * Math.random());
+            ws.send(JSON.stringify({ op: 2, d: {
+                token: bearer ? 'Bearer ' + tok : tok,
+                intents: 0,
+                properties: { os: 'browser', browser: 'NDSWeb', device: 'NDSWeb' },
+                presence: dcPresencePayload()
+            } }));
+        } else if (m.op === 1)  { dcBeat(); }
+        else if (m.op === 7 || m.op === 9) { ws.close(); }
+        else if (m.op === 0 && m.t === 'READY') { _dc.ready = true; _dc.retry = 0; dcSendPresence(); dcRenderStatus(); }
+    };
+    ws.onclose = ev => {
+        clearInterval(_dc.hb);
+        if (_dc.ws === ws) { _dc.ws = null; _dc.ready = false; }
+        dcRenderStatus();
+        if (_dc.closing || !_dc.activity) return;
+        if (ev.code === 4004) {                                   // authentication failed
+            if (!bearer) { localStorage.setItem('ndsweb_dc_bearer', '1'); dcConnect(); }   // retry with the "Bearer " prefix
+            else showToast('Discord rejected the login. Try disconnecting and connecting again.', 'error', 7000);
+            return;
+        }
+        if (++_dc.retry <= 5) setTimeout(() => { if (!_dc.ws && _dc.activity && !_dc.closing) dcConnect(); }, 3000 * _dc.retry);
+    };
+    ws.onerror = () => {};
+}
+
+function discordStop() {
+    _dc.activity = null; _dc.game = null;
+    const ws = _dc.ws;
+    if (ws && ws.readyState === 1) {
+        if (_dc.ready) ws.send(JSON.stringify({ op: 3, d: dcPresencePayload() }));
+        _dc.closing = true;
+        setTimeout(() => { try { ws.close(); } catch (e) {} }, 300);
+    } else if (ws) { _dc.closing = true; try { ws.close(); } catch (e) {} }
+    dcRenderStatus();
+}
+
+// ---- Cover art ---------------------------------------------------------------
+function dcImageLoads(url) {
+    return new Promise(res => {
+        const img = new Image();
+        const t = setTimeout(() => res(false), 4000);
+        img.onload  = () => { clearTimeout(t); res(true); };
+        img.onerror = () => { clearTimeout(t); res(false); };
+        img.src = url;
+    });
+}
+
+async function discordOnGameStart(gameName) {
+    if (!dcConfigured() || !dcTokens() || !dcEnabled()) return;
+    if (_dc.game === gameName) return;
+    _dc.game = gameName;
+    const info  = getConsoleInfo(gameName);
+    const clean = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    _dc.activity = {
+        name: clean, type: 0, application_id: DISCORD_APP_ID,
+        details: info.consoleName, state: 'on NDSWeb',
+        timestamps: { start: Date.now() },
+        assets: { large_text: clean }
+    };
+    if (_dc.ready) dcSendPresence(); else dcConnect();          // show it right away, cover follows
+
+    try {
+        const rom = await getROM(gameName);
+        const url = (rom && rom.customCover)
+            || `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(clean)}.png`;
+        if (_dc.game !== gameName || !/^https:\/\//i.test(url)) return;
+        if (!(await dcImageLoads(url))) return;
+        const j = await dcWorker('/asset', { url });
+        if (_dc.game === gameName && _dc.activity && j.path) {
+            _dc.activity.assets.large_image = j.path;
+            dcSendPresence();
+        }
+    } catch (e) { console.warn('Discord cover art skipped:', e); }
+}
+
+function dcInit() {
+    document.getElementById('dc-connect').addEventListener('click', dcStartAuth);
+    document.getElementById('dc-disconnect').addEventListener('click', async () => {
+        const t = dcTokens();
+        discordStop();
+        if (t) { try { await dcWorker('/revoke', { token: t.refresh_token || t.access_token }); } catch (e) { /* best effort */ } }
+        dcClearTokens();
+        dcRenderStatus();
+        showToast('Discord disconnected.', 'info');
+    });
+    document.querySelectorAll('#dc-toggles .seg-btn').forEach(b => b.addEventListener('click', () => {
+        const on = b.dataset.dc === '1';
+        localStorage.setItem('ndsweb_dc_on', on ? '1' : '0');
+        if (!on) discordStop();
+        else if (_currentGameName && _savStarted) discordOnGameStart(_currentGameName);
+        dcRenderStatus();
+    }));
+    dcRenderStatus();
+    dcHandleRedirect();
+}
+
 window.onload = async () => {
     lucide.createIcons();
 
@@ -3557,6 +3804,7 @@ window.onload = async () => {
 
     buildColorSwatches();
     initThemeSettings();
+    dcInit();
 
     try {
         await initDB();
