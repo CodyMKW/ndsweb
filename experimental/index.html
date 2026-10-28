@@ -3575,7 +3575,7 @@ window.addEventListener('pagehide', () => { try { if (P2P.peer) P2P.peer.destroy
 const DISCORD_APP_ID     = '1564877675531603988';
 const DISCORD_WORKER_URL = 'https://ndsweb-helper.codymkw.workers.dev/';
 
-const _dc = { ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null };
+const _dc = { variant: Math.min(3, Number(localStorage.getItem('ndsweb_dc_variant')) || 0), ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null };
 
 const dcConfigured = () => !/^YOUR_/.test(DISCORD_APP_ID) && !/YOUR-WORKER/.test(DISCORD_WORKER_URL);
 const dcEnabled    = () => localStorage.getItem('ndsweb_dc_on') !== '0';
@@ -3676,6 +3676,21 @@ function dcSendPresence() {
     if (_dc.ws && _dc.ws.readyState === 1 && _dc.ready) _dc.ws.send(JSON.stringify({ op: 3, d: dcPresencePayload() }));
 }
 
+// The gateway answered our first IDENTIFY with close code 4000, so we cycle through
+// a few payload shapes until one reaches READY (the working one is remembered).
+//  0: bot-style (intents 0) + presence inside IDENTIFY
+//  1: no intents, presence sent after READY instead
+//  2: no intents, legacy "$"-prefixed properties, presence after READY
+//  3: intents 0, presence after READY
+function dcIdentifyPayload(token, v) {
+    const props = { os: 'browser', browser: 'NDSWeb', device: 'NDSWeb' };
+    const legacy = { $os: 'browser', $browser: 'NDSWeb', $device: 'NDSWeb' };
+    if (v === 1) return { token, properties: props, compress: false };
+    if (v === 2) return { token, properties: legacy, compress: false };
+    if (v === 3) return { token, intents: 0, properties: props };
+    return { token, intents: 0, properties: props, presence: dcPresencePayload() };
+}
+
 async function dcConnect() {
     console.info('[Discord] connecting to gateway');
     if (_dc.ws || !dcTokens()) return;
@@ -3694,23 +3709,24 @@ async function dcConnect() {
             const iv = m.d.heartbeat_interval;
             clearInterval(_dc.hb);
             setTimeout(() => { if (_dc.ws === ws) { dcBeat(); _dc.hb = setInterval(dcBeat, iv); } }, iv * Math.random());
-            console.info('[Discord] gateway hello, identifying', bearer ? '(Bearer prefix)' : '(raw token)');
-            ws.send(JSON.stringify({ op: 2, d: {
-                token: bearer ? 'Bearer ' + tok : tok,
-                intents: 0,
-                properties: { os: 'browser', browser: 'NDSWeb', device: 'NDSWeb' },
-                presence: dcPresencePayload()
-            } }));
+            console.info('[Discord] gateway hello, identifying', bearer ? '(Bearer prefix)' : '(raw token)', 'variant', _dc.variant);
+            ws.send(JSON.stringify({ op: 2, d: dcIdentifyPayload(bearer ? 'Bearer ' + tok : tok, _dc.variant) }));
         } else if (m.op === 1)  { dcBeat(); }
         else if (m.op === 7 || m.op === 9) { ws.close(); }
-        else if (m.op === 0 && m.t === 'READY') { _dc.ready = true; _dc.retry = 0; console.info('[Discord] gateway READY, sending presence', _dc.activity); dcSendPresence(); dcRenderStatus(); }
+        else if (m.op === 0 && m.t === 'READY') { _dc.ready = true; _dc.retry = 0; localStorage.setItem('ndsweb_dc_variant', String(_dc.variant)); console.info('[Discord] gateway READY, sending presence', _dc.activity); dcSendPresence(); dcRenderStatus(); }
     };
     ws.onclose = ev => {
         console.info('[Discord] gateway closed', ev.code, ev.reason || '(no reason)');
         clearInterval(_dc.hb);
+        const wasReady = _dc.ready;
         if (_dc.ws === ws) { _dc.ws = null; _dc.ready = false; }
         dcRenderStatus();
         if (_dc.closing || !_dc.activity) return;
+        if (ev.code === 4000 && !wasReady) {                       // gateway didn't like the IDENTIFY shape
+            if (_dc.variant < 3) { _dc.variant++; console.info('[Discord] trying identify variant', _dc.variant); dcConnect(); }
+            else { _dc.variant = 0; showToast('Discord gateway keeps closing the connection (code 4000). Check the console for [Discord] lines.', 'error', 8000); }
+            return;
+        }
         if (ev.code === 4004) {                                   // authentication failed
             if (!bearer) { localStorage.setItem('ndsweb_dc_bearer', '1'); dcConnect(); }   // retry with the "Bearer " prefix
             else showToast('Discord rejected the login. Try disconnecting and connecting again.', 'error', 7000);
