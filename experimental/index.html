@@ -1397,10 +1397,13 @@
             <button id="btn-friends" title="Friends / watch" class="toolbar-icon-btn">
                 <i data-lucide="users"></i>
             </button>
+            <button id="btn-rotate" title="Rotate screen" class="toolbar-icon-btn">
+                <i data-lucide="rotate-cw"></i>
+            </button>
             <button id="btn-pin-toolbar" title="Pin toolbar" class="toolbar-icon-btn" onclick="toggleToolbarPin()">
                 <i data-lucide="pin"></i>
             </button>
-            <button class="toolbar-icon-btn" title="Fullscreen" onclick="document.getElementById('game-container').requestFullscreen?.()">
+            <button class="toolbar-icon-btn" title="Fullscreen" onclick="document.getElementById('emulator-wrapper').requestFullscreen?.()">
                 <i data-lucide="maximize"></i>
             </button>
         </div>
@@ -2392,6 +2395,37 @@ async function handleFiles(files) {
 // ─────────────────────────────────────────────────────────────
 // REVOKE OBJECT URLS (memory leak fix)
 // ─────────────────────────────────────────────────────────────
+// Screen rotation (for sideways games). Remembered per game.
+let _rotation = 0;
+function applyRotation(deg) {
+    _rotation = ((deg % 360) + 360) % 360;
+    const gc = document.getElementById('game-container');
+    if (!gc) return;
+    if (_rotation === 0) {
+        gc.style.cssText = 'width:100%;height:100%;';
+    } else if (_rotation === 180) {
+        gc.style.cssText = 'width:100%;height:100%;transform:rotate(180deg);';
+    } else {
+        // 90/270: swap the box dimensions so the rotated game still fills the screen
+        gc.style.cssText = 'position:absolute;top:50%;left:50%;width:100vh;height:100vw;' +
+                           `transform:translate(-50%,-50%) rotate(${_rotation}deg);`;
+    }
+    const btn = document.getElementById('btn-rotate');
+    if (btn) { btn.classList.toggle('active', _rotation !== 0); btn.title = `Rotate screen (now ${_rotation}°)`; }
+}
+function loadRotation(name) {
+    const v = parseInt(localStorage.getItem('ndsweb_rot:' + name), 10);
+    return [0, 90, 180, 270].includes(v) ? v : 0;
+}
+document.getElementById('btn-rotate').addEventListener('click', () => {
+    applyRotation(_rotation + 90);
+    if (_currentGameName) {
+        try { localStorage.setItem('ndsweb_rot:' + _currentGameName, String(_rotation)); } catch (e) {}
+    }
+    window.dispatchEvent(new Event('resize'));   // nudge the emulator to re-fit its canvas
+    if (typeof broadcastPresence === 'function') broadcastPresence();
+});
+
 function revokeAll() {
     _objectURLs.forEach(url => { try { URL.revokeObjectURL(url); } catch(e) {} });
     _objectURLs = [];
@@ -2549,6 +2583,7 @@ async function launchEmulator(file, gameName) {
     emuWrapper.classList.add('active');
     document.getElementById('now-playing-title').textContent = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
 
+    applyRotation(loadRotation(gameName));
     const gameUrl = trackURL(URL.createObjectURL(file));
 
     window.EJS_player        = '#game-container';
@@ -2637,7 +2672,7 @@ function saveFriends(f) { localStorage.setItem('ndsweb_friends', JSON.stringify(
 
 // ---- presence ---------------------------------------------------------------
 function myPresence() {
-    return { name: getMyName(), playing: _p2pLive, badge: _p2pBadge, sharing: !!(_p2pShare && _p2pLive) };
+    return { name: getMyName(), playing: _p2pLive, badge: _p2pBadge, sharing: !!(_p2pShare && _p2pLive), rot: _rotation };
 }
 function safeSend(conn, msg) { try { if (conn && conn.open) conn.send(msg); } catch (e) { console.warn('send failed', e); } }
 function broadcastPresence() {
@@ -2649,6 +2684,7 @@ function applyPresence(rec, m) {
     rec.playing = m.playing ? String(m.playing).slice(0, 80) : null;
     rec.badge   = String(m.badge || '').slice(0, 5);
     rec.sharing = !!m.sharing;
+    rec.rot     = [0, 90, 180, 270].includes(Number(m.rot)) ? Number(m.rot) : 0;
     const f = loadFriends();
     if (f[rec.id] && nm && f[rec.id] !== nm) { f[rec.id] = nm; saveFriends(f); }
 }
@@ -2922,6 +2958,7 @@ function onHello(rec, msg) {
 function afterPresence(id) {
     const rec = P2P.conns.get(id);
     if (!rec) return;
+    if (P2P.watching === id) applyWatchRotation(rec.rot || 0);
     if (P2P.watching === id) {
         if (!rec.playing || !rec.sharing) setWatchStatus(`${rec.name} isn't sharing a game right now.`);
         else if (!P2P.incomingCall) { setWatchStatus('Connecting to the stream…'); safeSend(rec.conn, { t: 'watch' }); }
@@ -3032,6 +3069,25 @@ function onIncomingCall(call) {
 
 function setIcon(btn, name) { btn.innerHTML = `<i data-lucide="${name}"></i>`; lucide.createIcons(); }
 
+// Show the friend's stream with the same rotation they chose on their side
+let _watchRot = 0;
+function applyWatchRotation(deg) {
+    _watchRot = deg;
+    const v = document.getElementById('wp-video');
+    const body = v && v.parentElement;
+    if (!v || !body) return;
+    if (deg === 0 || deg === 180) {
+        v.style.cssText = `width:100%;height:100%;max-height:none;transform:rotate(${deg}deg);`;
+    } else {
+        // 90/270: swap the box so the rotated picture still fits the panel
+        v.style.cssText = `width:${body.clientHeight}px;height:${body.clientWidth}px;max-height:none;flex-shrink:0;transform:rotate(${deg}deg);`;
+    }
+}
+if (window.ResizeObserver) {
+    new ResizeObserver(() => { if (_watchRot === 90 || _watchRot === 270) applyWatchRotation(_watchRot); })
+        .observe(document.querySelector('#watch-panel .wp-body'));
+}
+
 function openWatchPanel(name) {
     document.getElementById('wp-title').textContent = `${name}'s game`;
     document.getElementById('watch-panel').classList.remove('hidden');
@@ -3066,6 +3122,7 @@ function watchFriend(id) {
     P2P.watching = id;
     document.getElementById('wp-video').srcObject = null;
     openWatchPanel(rec.name);
+    applyWatchRotation(rec.rot || 0);
     safeSend(rec.conn, { t: 'watch' });
     document.getElementById('emu-friends').classList.add('hidden');
 }
@@ -3332,7 +3389,7 @@ function bindP2PUI() {
         setIcon(e.currentTarget, big ? 'minimize-2' : 'maximize-2');
     });
     document.getElementById('wp-fs').addEventListener('click', () => {
-        const target = video.requestFullscreen ? video : panel;
+        const target = video.parentElement.requestFullscreen ? video.parentElement : panel;
         if (target.requestFullscreen) target.requestFullscreen().catch(() => {});
     });
     document.getElementById('wp-mute').addEventListener('click', e => {
