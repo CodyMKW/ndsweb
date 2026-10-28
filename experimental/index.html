@@ -3575,7 +3575,7 @@ window.addEventListener('pagehide', () => { try { if (P2P.peer) P2P.peer.destroy
 const DISCORD_APP_ID     = '1564877675531603988';
 const DISCORD_WORKER_URL = 'https://ndsweb-helper.codymkw.workers.dev/';
 
-const _dc = { variant: Math.min(3, Number(localStorage.getItem('ndsweb_dc_variant')) || 0), ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null };
+const _dc = { variant: (v => v === null ? 1 : Math.min(3, Number(v) || 0))(localStorage.getItem('ndsweb_dc_variant')), ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null };
 
 const dcConfigured = () => !/^YOUR_/.test(DISCORD_APP_ID) && !/YOUR-WORKER/.test(DISCORD_WORKER_URL);
 const dcEnabled    = () => localStorage.getItem('ndsweb_dc_on') !== '0';
@@ -3764,12 +3764,13 @@ async function discordOnGameStart(gameName) {
     if (_dc.game === gameName) return;
     _dc.game = gameName;
     const info  = getConsoleInfo(gameName);
-    const clean = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    const clean  = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    const pretty = clean.replace(/\s*\([^)]*\)/g, '').trim() || clean;   // drop "(USA, Europe) (Rev 1)" tags for display
     _dc.activity = {
-        name: clean, type: 0, application_id: DISCORD_APP_ID,
+        name: pretty, type: 0, application_id: DISCORD_APP_ID,
         details: info.consoleName, state: 'on NDSWeb',
         timestamps: { start: Date.now() },
-        assets: { large_text: clean }
+        assets: { large_text: pretty }
     };
     if (_dc.ready) dcSendPresence(); else dcConnect();          // show it right away, cover follows
 
