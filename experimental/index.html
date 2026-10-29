@@ -912,7 +912,11 @@
 #watch-panel.big {
     width: min(960px, calc(100vw - 2rem));
     height: min(85vh, 700px);
-    right: 50%; bottom: 50%; transform: translate(50%, 50%);
+    left: 50% !important;
+    top: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    right: auto !important;
+    bottom: auto !important;
     display: flex; flex-direction: column;
 }
 
@@ -3502,6 +3506,11 @@ function bindP2PUI() {
     document.getElementById('wp-size').addEventListener('click', e => {
         const big = panel.classList.toggle('big');
         setIcon(e.currentTarget, big ? 'minimize-2' : 'maximize-2');
+        if (!big) {
+            panel.style.left = '2rem';
+            panel.style.top = '5rem';
+            panel.style.transform = 'none';
+        }
     });
     document.getElementById('wp-fs').addEventListener('click', () => {
         const target = video.parentElement.requestFullscreen ? video.parentElement : panel;
