@@ -959,6 +959,33 @@
             background: rgba(26,26,36,0.96);
         }
         #emu-friends .ef-title { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.75rem; }
+
+        /* ── Library compare ── */
+        #lib-panel {
+            position: fixed; inset: 0; z-index: 150;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(0,0,0,0.6); padding: 1rem;
+        }
+        #lib-panel.hidden { display: none; }
+        .lib-card {
+            width: min(560px, 100%); max-height: min(80vh, 640px);
+            display: flex; flex-direction: column; border-radius: 1rem; overflow: hidden;
+            background: rgba(20,20,28,0.97);
+        }
+        .lib-body { padding: 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; min-height: 0; flex: 1; }
+        #lib-tabs { display: flex; flex-wrap: wrap; }
+        #lib-list { overflow-y: auto; min-height: 6rem; flex: 1; }
+        .lib-row {
+            display: flex; align-items: center; gap: 0.6rem;
+            padding: 0.5rem 0.65rem; border-radius: 0.6rem; font-size: 0.8125rem;
+            background: rgba(37,37,51,0.5); margin-bottom: 0.35rem;
+        }
+        .lib-badge {
+            flex-shrink: 0; min-width: 2.6rem; text-align: center;
+            font-size: 0.65rem; font-weight: 700; padding: 0.15rem 0.35rem; border-radius: 0.35rem;
+            background: var(--accent-bg); color: var(--accent);
+        }
+        .lib-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     </style>
 </head>
 
@@ -1124,6 +1151,14 @@
                             </div>
                             <p class="p2p-note">For 2-player NES / SNES games. Your friend watches your stream and sends their controller to you. Their button presses only count while you leave this on and your tab stays open.</p>
                         </div>
+                        <div class="settings-section">
+                            <p class="settings-label">Let friends see my library list</p>
+                            <div class="seg-ctrl" id="lib-share-toggles">
+                                <button class="seg-btn" data-lib="1">On</button>
+                                <button class="seg-btn" data-lib="0">Off</button>
+                            </div>
+                            <p class="p2p-note">Accepted friends can compare game titles with you. Only the titles and consoles are shared, never the ROM files.</p>
+                        </div>
                     </div>
 
                     <div class="glass-panel settings-panel">
@@ -1251,13 +1286,21 @@
                             <i data-lucide="message-circle"></i> Discord Presence
                             <span id="dc-status" class="p2p-status offline"><span class="p2p-dot"></span><span id="dc-status-text">Not connected</span></span>
                         </h3>
-                        <p style="font-size:0.8125rem;color:#9ca3af;margin-bottom:1rem;">Show the game you're playing on your Discord profile while NDSWeb is open, with its cover art when available.</p>
+                        <p style="font-size:0.8125rem;color:#9ca3af;margin-bottom:1rem;">Show the game you're playing on your Discord profile while NDSWeb is open, with its cover art when available. If you're watching a friend instead, that shows up too, along with how many people are watching you.</p>
                         <div class="settings-section">
                             <p class="settings-label">Show what I'm playing</p>
                             <div class="seg-ctrl" id="dc-toggles">
                                 <button class="seg-btn" data-dc="1">On</button>
                                 <button class="seg-btn" data-dc="0">Off</button>
                             </div>
+                        </div>
+                        <div class="settings-section">
+                            <p class="settings-label">Show friends' names</p>
+                            <div class="seg-ctrl" id="dc-name-toggles">
+                                <button class="seg-btn" data-dcn="1">On</button>
+                                <button class="seg-btn" data-dcn="0">Off</button>
+                            </div>
+                            <p class="p2p-note">Off: Discord says "A friend is playing" when you watch someone. On: it shows their display name. The game title is shown either way.</p>
                         </div>
                         <div class="btn-row">
                             <button id="dc-connect" class="btn-accent"><i data-lucide="link" style="width:1rem;height:1rem;"></i> Connect Discord</button>
@@ -1491,6 +1534,26 @@
     <div class="join-row" style="gap: 0.4rem;">
         <input type="text" id="emu-chat-input" class="text-input" placeholder="Type message..." style="font-size: 0.75rem; padding: 0.4rem 0.6rem;" autocomplete="off" />
         <button id="emu-chat-send" class="btn-accent" style="padding: 0.4rem 0.7rem; font-size: 0.75rem;"><i data-lucide="send" style="width:0.85rem;height:0.85rem;"></i></button>
+    </div>
+</div>
+
+<!-- Library compare -->
+<div id="lib-panel" class="hidden">
+    <div class="lib-card glass-panel">
+        <div class="wp-head">
+            <span class="wp-title" id="lib-title">Library</span>
+            <div class="wp-btns"><button id="lib-close" title="Close"><i data-lucide="x"></i></button></div>
+        </div>
+        <div class="lib-body">
+            <input type="text" id="lib-filter" class="text-input" placeholder="Filter games…" autocomplete="off" />
+            <div class="seg-ctrl" id="lib-tabs">
+                <button class="seg-btn" data-tab="both">Both have</button>
+                <button class="seg-btn" data-tab="theirs">Only they have</button>
+                <button class="seg-btn" data-tab="mine">Only I have</button>
+            </div>
+            <div id="lib-status" class="p2p-note"></div>
+            <div id="lib-list"></div>
+        </div>
     </div>
 </div>
 
@@ -2712,6 +2775,7 @@ function applyPresence(rec, m) {
 }
 
 function updateWatcherUI() {
+    dcSchedule();
     const badge = document.getElementById('emu-watcher-badge');
     const countSpan = document.getElementById('emu-watcher-count');
     if (!badge || !countSpan) return;
@@ -2898,6 +2962,8 @@ function handleClose(conn) {
     const call = P2P.calls.get(id);
     if (call) { try { call.close(); } catch (e) {} P2P.calls.delete(id); }
     if (P2P.watching === id) setWatchStatus(`${rec.name} disconnected. Waiting for them to come back…`);
+    dcSchedule();
+    if (_libView.id === id) closeLibPanel();
     renderFriends();
 }
 
@@ -2917,6 +2983,9 @@ function handleMsg(conn, msg) {
         case 'chat':                                        
             appendChatMessage(rec.name || 'Friend', msg.text); 
             break;                                           
+        case 'lib-req':     if (rec.accepted) onLibRequest(rec); break;
+        case 'lib':         if (rec.accepted) onLibData(rec, msg); break;
+        case 'lib-denied':  if (rec.accepted && _libView.id === id) { rec.libDenied = true; renderLibCompare(); } break;
         case 'ctl-req':     if (rec.accepted) onCtlRequest(rec); break;
         case 'in':          if (rec.accepted) onGuestInput(rec, msg); break;
         case 'ctl-release': releaseGuest(id); break;
@@ -2980,7 +3049,7 @@ function onHello(rec, msg) {
 function afterPresence(id) {
     const rec = P2P.conns.get(id);
     if (!rec) return;
-    if (P2P.watching === id) applyWatchRotation(rec.rot || 0);
+    if (P2P.watching === id) { applyWatchRotation(rec.rot || 0); dcSchedule(); }
     if (P2P.watching === id) {
         if (!rec.playing || !rec.sharing) setWatchStatus(`${rec.name} isn't sharing a game right now.`);
         else if (!P2P.incomingCall) { setWatchStatus('Connecting to the stream…'); safeSend(rec.conn, { t: 'watch' }); }
@@ -3142,6 +3211,7 @@ function watchFriend(id) {
     }
     if (P2P.incomingCall) { const c = P2P.incomingCall; P2P.incomingCall = null; try { c.close(); } catch (e) {} }
     P2P.watching = id;
+    dcSchedule();
     document.getElementById('wp-video').srcObject = null;
     openWatchPanel(rec.name);
     applyWatchRotation(rec.rot || 0);
@@ -3153,6 +3223,7 @@ function closeWatchPanel(notify = true) {
     const id = P2P.watching;
     if (notify && id) { const rec = P2P.conns.get(id); if (rec) safeSend(rec.conn, { t: 'unwatch' }); }
     P2P.watching = null;
+    dcSchedule();
     if (P2P.incomingCall) { const c = P2P.incomingCall; P2P.incomingCall = null; try { c.close(); } catch (e) {} }
     const v = document.getElementById('wp-video');
     v.srcObject = null;
@@ -3183,6 +3254,7 @@ function onCtlRequest(rec) {
     if (!_p2pLive || !P2P.watchers.has(rec.id)) return deny('idle');
     if (P2P.guest && P2P.guest !== rec.id && P2P.conns.has(P2P.guest)) return deny('taken');
     P2P.guest = rec.id;
+    dcSchedule();
     safeSend(rec.conn, { t: 'ctl-ok' });
     showToast(`${escHtml(rec.name)} is now Player 2.`, 'info');
 }
@@ -3199,6 +3271,7 @@ function releaseGuest(id) {
     P2P.guestHeld.forEach(i => p2pSim(i, 0));
     P2P.guestHeld.clear();
     P2P.guest = null;
+    dcSchedule();
 }
 function setControl(on) {
     _p2pControl = on;
@@ -3217,6 +3290,7 @@ function sendCtl(msg) {
     if (rec) safeSend(rec.conn, msg);
 }
 function syncCtlBtn() {
+    dcSchedule();
     const b = document.getElementById('wp-control');
     if (b) { b.classList.toggle('active', _ctl.on); b.title = _ctl.on ? 'Stop playing as Player 2' : 'Play as Player 2 (needs host permission)'; }
 }
@@ -3311,6 +3385,13 @@ function friendRow(id, name, compact) {
         actions.appendChild(w);
     }
     if (!compact) {
+        if (online) {
+            const lb = document.createElement('button');
+            lb.className = 'mini-btn';
+            lb.innerHTML = '<i data-lucide="library"></i> Library';
+            lb.addEventListener('click', () => openLibCompare(id));
+            actions.appendChild(lb);
+        }
         const r = document.createElement('button');
         r.className = 'mini-btn ghost';
         r.title = 'Remove friend';
@@ -3550,8 +3631,111 @@ function sendChatMessage() {
     }
 }
 
+// ---- Library compare ---------------------------------------------------------
+// Only the LIST (title + console) is shared, and only with accepted friends.
+// ROM files are never sent over the connection.
+let _libShare = localStorage.getItem('ndsweb_lib_share') !== '0';
+const _libView = { id: null, tab: 'both', q: '' };
+const LIB_MAX = 2000;
+const libStrip = n => String(n).replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+function libKey(g) {
+    // same game across regions/revisions: drop "(USA)" / "[!]" tags, case and punctuation; keep the console
+    return libStrip(g.n).toLowerCase().replace(/\s*[\(\[][^)\]]*[\)\]]/g, '').replace(/[^a-z0-9]+/g, '') + '|' + g.b;
+}
+async function myLibGames() {
+    const all = db ? await getROMs() : [];
+    return all.filter(f => f && typeof f.name === 'string' && !f.name.startsWith('_bios_'))
+              .slice(0, LIB_MAX)
+              .map(f => ({ n: f.name.slice(0, 120), b: getConsoleInfo(f.name).badge }));
+}
+async function onLibRequest(rec) {
+    if (!_libShare) { safeSend(rec.conn, { t: 'lib-denied' }); return; }
+    try { safeSend(rec.conn, { t: 'lib', games: await myLibGames() }); }
+    catch (e) { safeSend(rec.conn, { t: 'lib-denied' }); }
+}
+function onLibData(rec, msg) {
+    if (_libView.id !== rec.id || !Array.isArray(msg.games)) return;      // only what we asked for
+    const games = [];
+    for (const g of msg.games.slice(0, LIB_MAX)) {
+        if (!g || typeof g.n !== 'string') continue;
+        games.push({ n: g.n.replace(/[\u0000-\u001f]/g, '').slice(0, 120), b: String(g.b || '').replace(/[^A-Za-z]/g, '').slice(0, 5) });
+    }
+    rec.lib = games; rec.libDenied = false;
+    renderLibCompare();
+}
+function openLibCompare(id) {
+    const rec = P2P.conns.get(id);
+    if (!rec || !rec.accepted || !rec.open) { showToast('That friend is offline.', 'warn'); return; }
+    _libView.id = id; _libView.tab = 'both'; _libView.q = '';
+    rec.lib = null; rec.libDenied = false;
+    document.getElementById('lib-filter').value = '';
+    document.getElementById('lib-title').textContent = `${rec.name}'s library`;
+    document.getElementById('lib-panel').classList.remove('hidden');
+    renderLibCompare();
+    safeSend(rec.conn, { t: 'lib-req' });
+    setTimeout(() => { if (_libView.id === id && !rec.lib && !rec.libDenied) renderLibCompare(true); }, 8000);
+    lucide.createIcons();
+}
+function closeLibPanel() {
+    _libView.id = null;
+    document.getElementById('lib-panel').classList.add('hidden');
+}
+async function renderLibCompare(timedOut) {
+    const id  = _libView.id;
+    const rec = id && P2P.conns.get(id);
+    if (!rec) return;
+    const status = document.getElementById('lib-status');
+    const list   = document.getElementById('lib-list');
+    const setTabs = counts => document.querySelectorAll('#lib-tabs .seg-btn').forEach(b => {
+        const label = { both: 'Both have', theirs: 'Only they have', mine: 'Only I have' }[b.dataset.tab];
+        b.textContent = counts ? `${label} (${counts[b.dataset.tab]})` : label;
+        b.classList.toggle('active', b.dataset.tab === _libView.tab);
+    });
+    if (rec.libDenied) { setTabs(null); status.textContent = `${rec.name} isn't sharing their library.`; list.replaceChildren(); return; }
+    if (!rec.lib)      { setTabs(null); status.textContent = timedOut ? `No answer from ${rec.name}. Try again in a moment.` : `Waiting for ${rec.name}…`; list.replaceChildren(); return; }
+
+    let mine;
+    try { mine = await myLibGames(); } catch (e) { mine = []; }
+    if (_libView.id !== id) return;                                       // closed or switched while loading
+
+    const myMap = new Map(), theirMap = new Map();
+    mine.forEach(g => myMap.set(libKey(g), g));
+    rec.lib.forEach(g => theirMap.set(libKey(g), g));
+    const groups = { both: [], theirs: [], mine: [] };
+    theirMap.forEach((g, k) => (myMap.has(k) ? groups.both : groups.theirs).push(g));
+    myMap.forEach((g, k) => { if (!theirMap.has(k)) groups.mine.push(g); });
+    setTabs({ both: groups.both.length, theirs: groups.theirs.length, mine: groups.mine.length });
+
+    const q = _libView.q;
+    const rows = groups[_libView.tab]
+        .filter(g => !q || libStrip(g.n).toLowerCase().includes(q))
+        .sort((a, b) => libStrip(a.n).localeCompare(libStrip(b.n)));
+    status.textContent = `${rows.length} game${rows.length === 1 ? '' : 's'}`;
+    list.replaceChildren(...rows.map(g => {
+        const row = document.createElement('div'); row.className = 'lib-row';
+        const bd  = document.createElement('span'); bd.className = 'lib-badge'; bd.textContent = g.b || '?';
+        const nm  = document.createElement('span'); nm.className = 'lib-name'; nm.textContent = libStrip(g.n); nm.title = libStrip(g.n);
+        row.append(bd, nm);
+        return row;
+    }));
+}
+function bindLibUI() {
+    document.getElementById('lib-close').addEventListener('click', closeLibPanel);
+    document.getElementById('lib-panel').addEventListener('click', e => { if (e.target.id === 'lib-panel') closeLibPanel(); });
+    document.getElementById('lib-filter').addEventListener('input', e => { _libView.q = e.target.value.toLowerCase().trim(); renderLibCompare(); });
+    document.querySelectorAll('#lib-tabs .seg-btn').forEach(b => b.addEventListener('click', () => { _libView.tab = b.dataset.tab; renderLibCompare(); }));
+    const setLibShare = on => {
+        _libShare = on;
+        localStorage.setItem('ndsweb_lib_share', on ? '1' : '0');
+        document.querySelectorAll('#lib-share-toggles .seg-btn').forEach(b => b.classList.toggle('active', (b.dataset.lib === '1') === on));
+    };
+    document.querySelectorAll('#lib-share-toggles .seg-btn').forEach(b => b.addEventListener('click', () => setLibShare(b.dataset.lib === '1')));
+    setLibShare(_libShare);
+}
+
 function initP2P() {
     bindP2PUI();
+    bindLibUI();
     renderFriends();
     startPeer();
 }
@@ -3575,7 +3759,7 @@ window.addEventListener('pagehide', () => { try { if (P2P.peer) P2P.peer.destroy
 const DISCORD_APP_ID     = '1564877675531603988';
 const DISCORD_WORKER_URL = 'https://ndsweb-helper.codymkw.workers.dev/';
 
-const _dc = { variant: (v => v === null ? 1 : Math.min(3, Number(v) || 0))(localStorage.getItem('ndsweb_dc_variant')), ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null };
+const _dc = { variant: (v => v === null ? 1 : Math.min(3, Number(v) || 0))(localStorage.getItem('ndsweb_dc_variant')), ws: null, hb: null, seq: null, ready: false, closing: false, retry: 0, activity: null, game: null, sig: null, subject: null, start: 0, coverFor: null, coverPath: null, rt: null };
 
 const dcConfigured = () => !/^YOUR_/.test(DISCORD_APP_ID) && !/YOUR-WORKER/.test(DISCORD_WORKER_URL);
 const dcEnabled    = () => localStorage.getItem('ndsweb_dc_on') !== '0';
@@ -3612,6 +3796,7 @@ function dcRenderStatus() {
     document.getElementById('dc-connect').classList.toggle('hidden', !!t);
     document.getElementById('dc-disconnect').classList.toggle('hidden', !t);
     document.querySelectorAll('#dc-toggles .seg-btn').forEach(b => b.classList.toggle('active', (b.dataset.dc === '1') === dcEnabled()));
+    document.querySelectorAll('#dc-name-toggles .seg-btn').forEach(b => b.classList.toggle('active', (b.dataset.dcn === '1') === dcShowNames()));
 }
 
 // ---- OAuth -----------------------------------------------------------------
@@ -3721,6 +3906,7 @@ async function dcConnect() {
         const wasReady = _dc.ready;
         if (_dc.ws === ws) { _dc.ws = null; _dc.ready = false; }
         dcRenderStatus();
+        if (_dc.closing && _dc.activity) { _dc.closing = false; dcConnect(); return; }   // a new activity arrived while closing
         if (_dc.closing || !_dc.activity) return;
         if (ev.code === 4000 && !wasReady) {                       // gateway didn't like the IDENTIFY shape
             if (_dc.variant < 3) { _dc.variant++; console.info('[Discord] trying identify variant', _dc.variant); dcConnect(); }
@@ -3738,12 +3924,15 @@ async function dcConnect() {
 }
 
 function discordStop() {
-    _dc.activity = null; _dc.game = null;
+    _dc.activity = null; _dc.game = null; _dc.sig = null; _dc.subject = null;
     const ws = _dc.ws;
     if (ws && ws.readyState === 1) {
         if (_dc.ready) ws.send(JSON.stringify({ op: 3, d: dcPresencePayload() }));
         _dc.closing = true;
-        setTimeout(() => { try { ws.close(); } catch (e) {} }, 300);
+        setTimeout(() => {
+            if (_dc.activity && _dc.ws === ws) { _dc.closing = false; dcSendPresence(); return; }   // something new to show
+            try { ws.close(); } catch (e) {}
+        }, 300);
     } else if (ws) { _dc.closing = true; try { ws.close(); } catch (e) {} }
     dcRenderStatus();
 }
@@ -3760,45 +3949,105 @@ function dcImageLoads(url) {
     });
 }
 
-async function discordOnGameStart(gameName) {
-    if (!dcConfigured() || !dcTokens() || !dcEnabled()) return;
-    if (_dc.game === gameName) return;
-    _dc.game = gameName;
-    const info  = getConsoleInfo(gameName);
-    const clean  = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
-    const pretty = clean.replace(/\s*\([^)]*\)/g, '').trim() || clean;   // drop "(USA, Europe) (Rev 1)" tags for display
-    _dc.activity = {
-        name: pretty, type: 0, application_id: DISCORD_APP_ID,
-        details: info.consoleName, state: 'on NDSWeb',
-        timestamps: { start: Date.now() },
-        assets: { large_text: pretty }
-    };
-    if (_dc.ready) dcSendPresence(); else dcConnect();          // show it right away, cover follows
+// ---- Activity builder (what Discord shows) -----------------------------------
+// Your own game wins. If you aren't playing but are watching a friend's stream,
+// that is shown instead. Everything is rebuilt from live state by dcRefresh(),
+// which is debounced (Discord limits how often presence may change).
+const DC_WATCH_TYPE = 3;                    // 3 = "Watching <game>"; set to 0 if Discord ignores it
+const DC_BADGE_EXT  = { NDS: '.nds', GBA: '.gba', GBC: '.gbc', GB: '.gb', NES: '.nes', SNES: '.sfc' };
+const dcShowNames   = () => localStorage.getItem('ndsweb_dc_names') === '1';
+const dcPretty      = clean => clean.replace(/\s*\([^)]*\)/g, '').trim() || clean;   // drop "(USA, Europe) (Rev 1)" tags for display
+const dcBoxArt      = (info, clean) => `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(clean)}.png`;
 
+function dcSchedule() { try { clearTimeout(_dc.rt); _dc.rt = setTimeout(dcRefresh, 600); } catch (e) { /* page still starting */ } }
+
+function dcDescribe() {
+    const names  = dcShowNames();
+    const friend = P2P.watching && P2P.conns.get(P2P.watching);
+    if (_dc.game) {
+        const key   = 'play:' + _dc.game;
+        const info  = getConsoleInfo(_dc.game);
+        const pretty = dcPretty(_dc.game.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, ''));
+        const bits  = ['on NDSWeb'];
+        const w = P2P.watchers.size;
+        if (w > 0) bits.push(w + ' watching');
+        const guest = P2P.guest && P2P.conns.get(P2P.guest);
+        if (guest) bits.push(names ? 'Player 2: ' + guest.name : 'Co-op');
+        if (friend && friend.open) bits.push(names ? 'also watching ' + friend.name : 'also watching a friend');
+        const game = _dc.game;
+        return {
+            key,
+            activity: { name: pretty, type: 0, application_id: DISCORD_APP_ID, details: info.consoleName, state: bits.join(' · '), assets: { large_text: pretty + ' · ' + info.badge } },
+            coverFn: () => dcOwnCover(game, key)
+        };
+    }
+    if (friend && friend.open && friend.playing && friend.sharing) {
+        const key    = 'watch:' + friend.id + ':' + friend.playing;
+        const info   = getConsoleInfo('x' + (DC_BADGE_EXT[friend.badge] || '.nds'));
+        const pretty = dcPretty(friend.playing);
+        const bits   = [info.badge + ' on NDSWeb'];
+        if (_ctl.on) bits.unshift('Playing as Player 2');
+        const clean = friend.playing;
+        return {
+            key,
+            activity: { name: pretty, type: DC_WATCH_TYPE, application_id: DISCORD_APP_ID, details: names ? friend.name + ' is playing' : 'A friend is playing', state: bits.join(' · '), assets: { large_text: pretty + ' · ' + info.badge } },
+            coverFn: () => dcFetchCover(key, dcBoxArt(info, clean), false)
+        };
+    }
+    return null;
+}
+
+function dcRefresh() {
+    clearTimeout(_dc.rt);
+    if (!dcConfigured() || !dcTokens() || !dcEnabled()) return;
+    const d = dcDescribe();
+    if (!d) { if (_dc.activity) discordStop(); return; }
+    const changedSubject = _dc.subject !== d.key;
+    if (changedSubject) { _dc.subject = d.key; _dc.start = Date.now(); }
+    d.activity.timestamps = { start: _dc.start };
+    if (_dc.coverFor === d.key && _dc.coverPath) d.activity.assets.large_image = _dc.coverPath;
+    const sig = JSON.stringify(d.activity);
+    _dc.activity = d.activity;
+    if (sig !== _dc.sig) {
+        _dc.sig = sig;
+        if (_dc.ready) dcSendPresence(); else dcConnect();               // show it right away, cover follows
+    }
+    if (changedSubject && d.coverFn) d.coverFn();
+    dcRenderStatus();
+}
+
+async function dcOwnCover(gameName, key) {
+    const info  = getConsoleInfo(gameName);
+    const clean = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    let rom = null;
+    try { rom = await getROM(gameName); } catch (e) { /* fall back to box art */ }
+    const custom = rom && rom.customCover;
+    dcFetchCover(key, custom || dcBoxArt(info, clean), !!custom);      // your own custom cover is trusted
+}
+
+async function dcFetchCover(key, url, trusted) {
     try {
-        const rom = await getROM(gameName);
-        const url = (rom && rom.customCover)
-            || `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(clean)}.png`;
         console.info('[Discord] cover art url:', url);
-        if (_dc.game !== gameName) { console.info('[Discord] cover skipped: game changed'); return; }
         if (!/^https:\/\//i.test(url)) { console.info('[Discord] cover skipped: not an https URL'); return; }
-        // Your own custom cover is trusted; only pre-check the auto-guessed box art (it often 404s)
-        if (!(rom && rom.customCover) && !(await dcImageLoads(url))) { console.info('[Discord] cover skipped: default box art not found'); return; }
+        // only pre-check auto-guessed box art (it often 404s)
+        if (!trusted && !(await dcImageLoads(url))) { console.info('[Discord] cover skipped: box art not found'); return; }
         let path = null;
         try {
-            const j = await dcWorker('/asset', { url, token: await dcEnsureToken() });
-            path = j.path;
+            path = (await dcWorker('/asset', { url, token: await dcEnsureToken() })).path;
             console.info('[Discord] cover resolved:', path);
         } catch (e) {
             // Discord may also accept a plain https URL as the image; harmless if it doesn't
             console.warn('[Discord] cover resolve failed, trying the raw URL:', e.message);
             path = url;
         }
-        if (_dc.game === gameName && _dc.activity && path) {
-            _dc.activity.assets.large_image = path;
-            dcSendPresence();
-        }
+        if (_dc.subject === key && path) { _dc.coverFor = key; _dc.coverPath = path; dcRefresh(); }
     } catch (e) { console.warn('Discord cover art skipped:', e); }
+}
+
+async function discordOnGameStart(gameName) {
+    if (!dcConfigured() || !dcTokens() || !dcEnabled()) return;
+    _dc.game = gameName;
+    dcRefresh();
 }
 
 function dcInit() {
@@ -3816,7 +4065,12 @@ function dcInit() {
         localStorage.setItem('ndsweb_dc_on', on ? '1' : '0');
         if (!on) discordStop();
         else if (_currentGameName && _savStarted) discordOnGameStart(_currentGameName);
+        else dcRefresh();
         dcRenderStatus();
+    }));
+    document.querySelectorAll('#dc-name-toggles .seg-btn').forEach(b => b.addEventListener('click', () => {
+        localStorage.setItem('ndsweb_dc_names', b.dataset.dcn === '1' ? '1' : '0');
+        dcRenderStatus(); dcSchedule();
     }));
     dcRenderStatus();
     dcHandleRedirect();
