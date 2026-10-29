@@ -3013,6 +3013,9 @@ function handleMsg(conn, msg) {
         case 'not-playing':
             if (P2P.watching === id) setWatchStatus(`${rec.name} isn't playing anything right now.`);
             break;
+        case 'rom-req':     if (rec.accepted) onRomRequest(rec, msg); break;
+        case 'rom-data':    if (rec.accepted) onRomDataReceived(msg); break;
+        case 'rom-denied':  if (rec.accepted) showToast(`Friend couldn't share "${libStrip(msg.name)}".`, 'warn'); break;
     }
 }
 
@@ -3716,8 +3719,64 @@ async function renderLibCompare(timedOut) {
         const bd  = document.createElement('span'); bd.className = 'lib-badge'; bd.textContent = g.b || '?';
         const nm  = document.createElement('span'); nm.className = 'lib-name'; nm.textContent = libStrip(g.n); nm.title = libStrip(g.n);
         row.append(bd, nm);
+        if (_libView.tab === 'theirs') {
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'mini-btn';
+            copyBtn.innerHTML = '<i data-lucide="download"></i> Copy';
+            copyBtn.style.marginLeft = 'auto';
+            copyBtn.addEventListener('click', () => requestGameFromFriend(id, g));
+            row.append(copyBtn);
+        }
         return row;
     }));
+}
+// Request the ROM file data from your friend
+function requestGameFromFriend(friendId, gameObj) {
+    const rec = P2P.conns.get(friendId);
+    if (!rec || !rec.open) {
+        showToast('Friend is offline.', 'error');
+        return;
+    }
+    showToast(`Requesting "${libStrip(gameObj.n)}" from ${rec.name}...`, 'info');
+    safeSend(rec.conn, { t: 'rom-req', name: gameObj.n });
+}
+
+// Handle incoming request for a ROM file from a friend (Host side)
+async function onRomRequest(rec, msg) {
+    if (!_libShare) return; // Ignore if library sharing is turned off
+    try {
+        const allRoms = await getROMs();
+        // Match the requested game name
+        const match = allRoms.find(r => libStrip(r.name).toLowerCase() === libStrip(msg.name).toLowerCase());
+        if (!match || !match.data) {
+            safeSend(rec.conn, { t: 'rom-denied', name: msg.name });
+            return;
+        }
+        
+        showToast(`${rec.name} is downloading "${libStrip(match.name)}" from your library.`, 'info');
+        
+        // Convert Blob/File to ArrayBuffer to transmit safely over PeerJS
+        const arrayBuffer = await match.data.arrayBuffer();
+        safeSend(rec.conn, { t: 'rom-data', name: match.name, data: arrayBuffer });
+    } catch (e) {
+        console.error('Failed to send ROM:', e);
+        safeSend(rec.conn, { t: 'rom-denied', name: msg.name });
+    }
+}
+
+// Handle receiving the ROM file data from your friend (Receiver side)
+async function onRomDataReceived(msg) {
+    try {
+        if (!msg.data) throw new Error('No data received');
+        // Rebuild the File object from the received ArrayBuffer
+        const file = new File([msg.data], msg.name, { type: 'application/octet-stream' });
+        await saveROM(file);
+        await renderLibrary();
+        showToast(`Successfully copied "${libStrip(msg.name)}" to your library!`, 'success');
+    } catch (e) {
+        console.error('Failed to save received ROM:', e);
+        showToast('Failed to copy game into your library.', 'error');
+    }
 }
 function bindLibUI() {
     document.getElementById('lib-close').addEventListener('click', closeLibPanel);
