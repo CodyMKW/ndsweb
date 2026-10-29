@@ -401,6 +401,10 @@
         .view-all-btn { font-size: 0.875rem; color: var(--accent); transition: color 0.2s; }
         .view-all-btn:hover { color: #fff; }
 
+        .section-gap {
+           margin-top: 1.5rem;
+        }
+
         /* ── Game grid ── */
         .games-grid {
             display: grid;
@@ -894,7 +898,7 @@
 
 /* Watch panel */
 #watch-panel {
-    position: fixed; right: 1rem; bottom: 5rem;
+    position: fixed; left: 2rem; top: 5rem;
     width: min(340px, calc(100vw - 2rem));
     max-height: calc(100vh - 7rem);
     display: flex; flex-direction: column;
@@ -916,6 +920,11 @@
     display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
     padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--white-5);
     flex-shrink: 0; /* Ensures the header never shrinks or disappears */
+    cursor: grab;
+}
+
+.wp-head:active {
+    cursor: grabbing;
 }
 
 .wp-body {
@@ -1179,7 +1188,7 @@
                 </div>
 
 <!-- CHAT PANEL -->
-<div class="glass-panel settings-panel span-2">
+<div class="glass-panel settings-panel span-2 section-gap">
     <h3><i data-lucide="message-square"></i> Chat</h3>
     <div id="p2p-chat-log" style="height: 180px; overflow-y: auto; background: rgba(0,0,0,0.3); border: 1px solid var(--white-8); border-radius: 0.75rem; padding: 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem;">
         <div style="color: #6b7280; text-align: center; font-style: italic;">Connect with a friend to start chatting.</div>
@@ -4147,6 +4156,7 @@ window.onload = async () => {
     root.style.setProperty('--accent-bg', savedColor.bg);
     window._accentHex = savedColor.hex;
     document.getElementById('ambient-glow').style.background = savedColor.hex;
+    makeDraggable(document.getElementById('watch-panel'), document.querySelector('#watch-panel .wp-head'));
 
     buildColorSwatches();
     initThemeSettings();
@@ -4167,6 +4177,47 @@ window.onload = async () => {
         localStorage.setItem('ndsweb_sort', e.target.value);
     });
 };
+
+// Make the Watch Panel Draggable
+function makeDraggable(panelEl, handleEl) {
+    let isDragging = false;
+    let startX = 0, startY = 0;
+
+    handleEl.addEventListener('mousedown', (e) => {
+        // Don't drag if clicking buttons inside the header
+        if (e.target.closest('button')) return;
+        
+        isDragging = true;
+        startX = e.clientX - panelEl.offsetLeft;
+        startY = e.clientY - panelEl.offsetTop;
+        
+        // Switch from right/bottom layout positioning to absolute left/top coordinates
+        panelEl.style.right = 'auto';
+        panelEl.style.bottom = 'auto';
+        panelEl.style.left = panelEl.offsetLeft + 'px';
+        panelEl.style.top = panelEl.offsetTop + 'px';
+        
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        
+        let newX = e.clientX - startX;
+        let newY = e.clientY - startY;
+        
+        // Keep it somewhat within screen bounds
+        newX = Math.max(0, Math.min(window.innerWidth - panelEl.offsetWidth, newX));
+        newY = Math.max(0, Math.min(window.innerHeight - panelEl.offsetHeight, newY));
+        
+        panelEl.style.left = newX + 'px';
+        panelEl.style.top = newY + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+        isDragging = false;
+    });
+}
 </script>
 </body>
 </html>
