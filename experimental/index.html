@@ -1170,7 +1170,16 @@
                                 <button class="seg-btn" data-lib="1">On</button>
                                 <button class="seg-btn" data-lib="0">Off</button>
                             </div>
-                            <p class="p2p-note">Accepted friends can compare game titles with you. Only the titles and consoles are shared, never the ROM files.</p>
+                            <p class="p2p-note">Accepted friends can compare game titles with you. The list only contains titles and consoles. Copying a game is controlled separately below.</p>
+                        </div>
+                        <div class="settings-section">
+                            <p class="settings-label">Let friends copy my games</p>
+                            <div class="seg-ctrl" id="rom-share-toggles">
+                                <button class="seg-btn" data-rom="auto">Allow</button>
+                                <button class="seg-btn" data-rom="ask">Ask me</button>
+                                <button class="seg-btn" data-rom="off">Off</button>
+                            </div>
+                            <p class="p2p-note">Lets accepted friends download a game file from your library after seeing it in the library comparison. "Ask me" shows a prompt each time. Saves are never sent.</p>
                         </div>
                     </div>
 
@@ -3066,6 +3075,8 @@ function registerConn(conn, incoming) {
 
 function handleClose(conn) {
     releaseGuest(conn.peer);
+    failRomIn(conn.peer, 'Connection lost during the transfer.');
+    _romOutBusy.delete(conn.peer);
     const id  = conn.peer;
     const rec = P2P.conns.get(id);
     if (!rec || rec.conn !== conn) return;
@@ -3127,8 +3138,11 @@ function handleMsg(conn, msg) {
             if (P2P.watching === id) setWatchStatus(`${rec.name} isn't playing anything right now.`);
             break;
         case 'rom-req':     if (rec.accepted) onRomRequest(rec, msg); break;
-        case 'rom-data':    if (rec.accepted) onRomDataReceived(msg); break;
-        case 'rom-denied':  if (rec.accepted) showToast(`Friend couldn't share "${libStrip(msg.name)}".`, 'warn'); break;
+        case 'rom-meta':    if (rec.accepted) onRomMeta(rec, msg); break;
+        case 'rom-chunk':   if (rec.accepted) onRomChunk(rec, msg); break;
+        case 'rom-end':     if (rec.accepted) onRomEnd(rec); break;
+        case 'rom-cancel':  if (rec.accepted) onRomCancel(rec); break;
+        case 'rom-denied':  if (rec.accepted) onRomDenied(rec, msg); break;
     }
 }
 
@@ -3848,54 +3862,202 @@ async function renderLibCompare(timedOut) {
         return row;
     }));
 }
-// Request the ROM file data from your friend
+// ---- Game copying between friends ---------------------------------------------
+// Files travel in 64 KB chunks with a progress toast on both sides.
+//  * Host setting (Connect tab): Allow / Ask me / Off.
+//  * The receiver only accepts a transfer it asked for, and only supported file types.
+let _romShare = ['auto', 'ask', 'off'].includes(localStorage.getItem('ndsweb_rom_share'))
+    ? localStorage.getItem('ndsweb_rom_share') : 'auto';
+const ROM_CHUNK = 64 * 1024;
+const ROM_MAX   = 512 * 1024 * 1024;
+const ROM_EXT   = /\.(nds|gba|gb|gbc|nes|sfc)$/i;
+const _romIn      = new Map();   // friendId -> transfer in progress (I am receiving)
+const _romWanted  = new Map();   // friendId -> Set of lowercase titles I asked for
+const _romOutBusy = new Set();   // friendIds I am currently sending to
+const romSafeName = n => String(n || '').replace(/[\\\/:*?"<>|\u0000-\u001f]/g, '').trim().slice(0, 120);
+const romKey      = n => libStrip(romSafeName(n)).toLowerCase();
+
+// A toast we can update while a transfer runs
+function makeProgressToast(text, icon) {
+    const c = document.getElementById('toast-container');
+    const t = document.createElement('div');
+    t.className = 'toast toast-info';
+    t.innerHTML = `<i data-lucide="${icon}" style="width:1rem;height:1rem;flex-shrink:0;"></i><span></span>`;
+    t.querySelector('span').textContent = text;
+    c.appendChild(t);
+    lucide.createIcons({ nodes: [t] });
+    let closed = false;
+    return {
+        set(s) { if (!closed) t.querySelector('span').textContent = s; },
+        close(s, type, ms = 3500) {
+            if (closed) return;
+            if (s) t.querySelector('span').textContent = s;
+            if (type) t.className = `toast toast-${type}`;
+            closed = true;
+            setTimeout(() => {
+                t.style.animation = 'toastOut 0.3s ease forwards';
+                setTimeout(() => t.remove(), 300);
+            }, s ? ms : 0);
+        }
+    };
+}
+
+function setRomShare(mode) {
+    _romShare = mode;
+    localStorage.setItem('ndsweb_rom_share', mode);
+    document.querySelectorAll('#rom-share-toggles .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.rom === mode));
+}
+
+// ---- receiving side ----------------------------------------------------------
 function requestGameFromFriend(friendId, gameObj) {
     const rec = P2P.conns.get(friendId);
-    if (!rec || !rec.open) {
-        showToast('Friend is offline.', 'error');
-        return;
-    }
-    showToast(`Requesting "${libStrip(gameObj.n)}" from ${rec.name}...`, 'info');
+    if (!rec || !rec.open) { showToast('Friend is offline.', 'error'); return; }
+    if (_romIn.has(friendId)) { showToast(`Already downloading a game from ${escHtml(rec.name)}.`, 'warn'); return; }
+    const key = romKey(gameObj.n);
+    if (!_romWanted.has(friendId)) _romWanted.set(friendId, new Set());
+    _romWanted.get(friendId).add(key);
+    showToast(`Requesting "${escHtml(libStrip(gameObj.n))}" from ${escHtml(rec.name)}…`, 'info');
     safeSend(rec.conn, { t: 'rom-req', name: gameObj.n });
 }
 
-// Handle incoming request for a ROM file from a friend (Host side)
-async function onRomRequest(rec, msg) {
-    if (!_libShare) return; // Ignore if library sharing is turned off
+function romWantedDone(friendId, key) {
+    const s = _romWanted.get(friendId);
+    if (s) { s.delete(key); if (!s.size) _romWanted.delete(friendId); }
+}
+
+function failRomIn(friendId, text) {
+    const t = _romIn.get(friendId);
+    if (!t) return;
+    _romIn.delete(friendId);
+    romWantedDone(friendId, romKey(t.name));
+    t.prog.close(text || 'Transfer failed.', 'error', 5000);
+}
+
+async function onRomMeta(rec, msg) {
+    const name = romSafeName(msg.name);
+    const key  = romKey(name);
+    const wanted = _romWanted.get(rec.id);
+    if (!wanted || !wanted.has(key)) return;                         // we never asked for this
+    const size = Number(msg.size), chunks = Number(msg.chunks);
+    if (!ROM_EXT.test(name)) { romWantedDone(rec.id, key); showToast('That file type isn\'t supported, so it was ignored.', 'warn'); return; }
+    if (!Number.isInteger(size) || size <= 0 || size > ROM_MAX || chunks !== Math.ceil(size / ROM_CHUNK)) {
+        romWantedDone(rec.id, key); showToast('The incoming game looked invalid, so it was ignored.', 'warn'); return;
+    }
     try {
-        const allRoms = await getROMs();
-        // Match the requested game name
-        const match = allRoms.find(r => libStrip(r.name).toLowerCase() === libStrip(msg.name).toLowerCase());
-        if (!match || !match.data) {
-            safeSend(rec.conn, { t: 'rom-denied', name: msg.name });
+        if (await getROM(name)) {
+            romWantedDone(rec.id, key);
+            safeSend(rec.conn, { t: 'rom-cancel', name });
+            showToast(`You already have "${escHtml(libStrip(name))}".`, 'info');
             return;
         }
-        
-        showToast(`${rec.name} is downloading "${libStrip(match.name)}" from your library.`, 'info');
-        
-        // Convert Blob/File to ArrayBuffer to transmit safely over PeerJS
-        const arrayBuffer = await match.data.arrayBuffer();
-        safeSend(rec.conn, { t: 'rom-data', name: match.name, data: arrayBuffer });
+    } catch (e) { /* carry on */ }
+    if (_romIn.has(rec.id)) failRomIn(rec.id, 'Replaced by a new transfer.');
+    const prog = makeProgressToast(`Receiving "${libStrip(name)}"… 0%`, 'download');
+    _romIn.set(rec.id, { name, size, chunks, got: 0, bytes: 0, parts: [], prog, pct: -1 });
+}
+
+function onRomChunk(rec, msg) {
+    const t = _romIn.get(rec.id);
+    if (!t) return;
+    const u8 = toU8(msg.data);
+    if (!u8 || msg.i !== t.got || t.got >= t.chunks || t.bytes + u8.length > t.size) { failRomIn(rec.id, 'Transfer got corrupted. Try again.'); return; }
+    t.parts.push(u8);
+    t.bytes += u8.length;
+    t.got++;
+    const pct = Math.floor((t.bytes / t.size) * 100);
+    if (pct !== t.pct) { t.pct = pct; t.prog.set(`Receiving "${libStrip(t.name)}"… ${pct}%`); }
+}
+
+async function onRomEnd(rec) {
+    const t = _romIn.get(rec.id);
+    if (!t) return;
+    if (t.got !== t.chunks || t.bytes !== t.size) { failRomIn(rec.id, 'Transfer ended early. Try again.'); return; }
+    _romIn.delete(rec.id);
+    romWantedDone(rec.id, romKey(t.name));
+    try {
+        const file = new File(t.parts, t.name, { type: 'application/octet-stream' });
+        await saveROM(file);
+        await renderLibrary();
+        t.prog.close(`Copied "${libStrip(t.name)}" to your library!`, 'success');
     } catch (e) {
-        console.error('Failed to send ROM:', e);
-        safeSend(rec.conn, { t: 'rom-denied', name: msg.name });
+        console.error('Failed to save received ROM:', e);
+        t.prog.close('Failed to copy game into your library.', 'error', 5000);
     }
 }
 
-// Handle receiving the ROM file data from your friend (Receiver side)
-async function onRomDataReceived(msg) {
+function onRomCancel(rec) { failRomIn(rec.id, 'The sender cancelled the transfer.'); }
+
+function onRomDenied(rec, msg) {
+    romWantedDone(rec.id, romKey(msg.name));
+    const g = escHtml(libStrip(romSafeName(msg.name)));
+    const n = escHtml(rec.name);
+    const text = ({
+        off:      `${n} isn't sharing games for copying.`,
+        declined: `${n} declined to share "${g}".`,
+        busy:     `${n} is busy right now. Try again in a moment.`,
+        missing:  `${n} no longer has "${g}".`
+    })[msg.why] || `${n} couldn't share "${g}".`;
+    showToast(text, 'warn', 5000);
+}
+
+// ---- sending side -----------------------------------------------------------
+async function onRomRequest(rec, msg) {
+    const reqName = String(msg.name || '');
+    const deny = why => safeSend(rec.conn, { t: 'rom-denied', name: reqName, why });
+    if (_romShare === 'off') return deny('off');
+    if (_romOutBusy.has(rec.id)) return deny('busy');
+    let match = null;
     try {
-        if (!msg.data) throw new Error('No data received');
-        // Rebuild the File object from the received ArrayBuffer
-        const file = new File([msg.data], msg.name, { type: 'application/octet-stream' });
-        await saveROM(file);
-        await renderLibrary();
-        showToast(`Successfully copied "${libStrip(msg.name)}" to your library!`, 'success');
+        const all = await getROMs();
+        match = all.find(r => !r.name.startsWith('_bios_') && romKey(r.name) === romKey(reqName));
+    } catch (e) { return deny('missing'); }
+    if (!match || !match.data) return deny('missing');
+
+    if (_romShare === 'ask') {
+        if (!document.getElementById('modal-overlay').classList.contains('hidden')) return deny('busy');
+        const ok = await new Promise(res => showModal(
+            'Share a game?',
+            `${rec.name} wants a copy of "${libStrip(match.name)}". Only the game file is sent, never your saves.`,
+            () => res(true), 'Send', 'background:#10b981;color:#000;', () => res(false)));
+        if (!ok) return deny('declined');
+        if (!rec.open || P2P.conns.get(rec.id) !== rec) return;
+    }
+    sendRom(rec, match);
+}
+
+async function sendRom(rec, rom) {
+    _romOutBusy.add(rec.id);
+    const label = libStrip(rom.name);
+    const prog = makeProgressToast(`Sending "${label}" to ${rec.name}… 0%`, 'upload');
+    try {
+        const buf  = await rom.data.arrayBuffer();
+        const size = buf.byteLength;
+        if (!size || size > ROM_MAX) throw new Error('size not allowed');
+        const chunks = Math.ceil(size / ROM_CHUNK);
+        safeSend(rec.conn, { t: 'rom-meta', name: rom.name, size, chunks });
+        const dc = rec.conn.dataChannel;
+        let lastPct = -1;
+        for (let i = 0; i < chunks; i++) {
+            if (!rec.conn.open || P2P.conns.get(rec.id) !== rec) throw new Error('connection lost');
+            while (dc && dc.bufferedAmount > 1024 * 1024) {                 // let the channel drain
+                await new Promise(r => setTimeout(r, 20));
+                if (!rec.conn.open) throw new Error('connection lost');
+            }
+            rec.conn.send({ t: 'rom-chunk', i, data: buf.slice(i * ROM_CHUNK, (i + 1) * ROM_CHUNK) });
+            const pct = Math.floor(((i + 1) / chunks) * 100);
+            if (pct !== lastPct) { lastPct = pct; prog.set(`Sending "${label}" to ${rec.name}… ${pct}%`); }
+        }
+        safeSend(rec.conn, { t: 'rom-end', name: rom.name });
+        prog.close(`Sent "${label}" to ${rec.name}.`, 'success');
     } catch (e) {
-        console.error('Failed to save received ROM:', e);
-        showToast('Failed to copy game into your library.', 'error');
+        console.warn('ROM send failed', e);
+        safeSend(rec.conn, { t: 'rom-cancel', name: rom.name });
+        prog.close('Transfer failed: ' + (e && e.message ? e.message : 'unknown error'), 'error', 5000);
+    } finally {
+        _romOutBusy.delete(rec.id);
     }
 }
+
 function bindLibUI() {
     document.getElementById('lib-close').addEventListener('click', closeLibPanel);
     document.getElementById('lib-panel').addEventListener('click', e => { if (e.target.id === 'lib-panel') closeLibPanel(); });
@@ -3908,6 +4070,8 @@ function bindLibUI() {
     };
     document.querySelectorAll('#lib-share-toggles .seg-btn').forEach(b => b.addEventListener('click', () => setLibShare(b.dataset.lib === '1')));
     setLibShare(_libShare);
+    document.querySelectorAll('#rom-share-toggles .seg-btn').forEach(b => b.addEventListener('click', () => setRomShare(b.dataset.rom)));
+    setRomShare(_romShare);
 }
 
 function initP2P() {
