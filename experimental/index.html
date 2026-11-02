@@ -1992,12 +1992,94 @@ async function flushSave({ force = false, quiet = true } = {}) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// BIOS INJECTION
+//  EmulatorJS hands the core a blob: URL, so the file ends up with a random
+//  name and mGBA/Gambatte never find "gba_bios.bin". We write the BIOS into the
+//  emulator's virtual filesystem under the exact filename the core expects.
+//  The correct system folder differs between EmulatorJS builds, so we write to
+//  every plausible folder (plus any folder named "system" we find).
+// ─────────────────────────────────────────────────────────────
+function fsFindDirs(FS, matcher) {
+    const found = [];
+    (function walk(p, depth) {
+        if (depth > 5) return;
+        let names; try { names = FS.readdir(p); } catch (e) { return; }
+        for (const n of names) {
+            if (n === '.' || n === '..') continue;
+            const full = (p === '/' ? '' : p) + '/' + n;
+            if (/^\/(proc|dev)/.test(full)) continue;
+            let st; try { st = FS.stat(full); } catch (e) { continue; }
+            if (FS.isDir(st.mode)) {
+                if (matcher(n, full)) found.push(full);
+                walk(full, depth + 1);
+            }
+        }
+    })('/', 0);
+    return found;
+}
+
+async function injectBios(gameName) {
+    const emu = getEmu();
+    if (!emu) return false;
+    const lower = gameName.toLowerCase();
+    let key, fileName;
+    if (lower.endsWith('.gba'))      { key = '_bios_gba'; fileName = 'gba_bios.bin'; }
+    else if (lower.endsWith('.gbc')) { key = '_bios_gbc'; fileName = 'gbc_bios.bin'; }
+    else if (lower.endsWith('.gb'))  { key = '_bios_gb';  fileName = 'gb_bios.bin';  }
+    else return false;
+
+    try {
+        const rec = await getROM(key);
+        if (!rec || !rec.data) return false;                    // no custom BIOS uploaded
+        const u8 = new Uint8Array(await rec.data.arrayBuffer());
+        if (key === '_bios_gba' && u8.length !== 16384) {
+            showToast(`That GBA BIOS is ${u8.length} bytes; the real one is 16384. It may be ignored.`, 'warn', 7000);
+        }
+
+        const FS = emu.gameManager.FS;
+        const dirs = new Set(['/', '/system', '/home/web_user/retroarch/userdata/system', '/home/web_user/retroarch/system']);
+        fsFindDirs(FS, n => n.toLowerCase() === 'system').forEach(d => dirs.add(d));
+
+        const written = [];
+        for (const dir of dirs) {
+            try {
+                if (dir !== '/' && !FS.analyzePath(dir).exists) {
+                    // only create the well-known paths; skip creating random ones
+                    if (!/^\/(system|home\/web_user\/retroarch\/(userdata\/)?system)$/.test(dir)) continue;
+                    let cur = '';
+                    for (const part of dir.split('/').filter(Boolean)) {
+                        cur += '/' + part;
+                        if (!FS.analyzePath(cur).exists) FS.mkdir(cur);
+                    }
+                }
+                const path = (dir === '/' ? '' : dir) + '/' + fileName;
+                if (FS.analyzePath(path).exists) FS.unlink(path);
+                FS.writeFile(path, u8);
+                written.push(path);
+            } catch (e) { console.warn('BIOS write skipped for', dir, e); }
+        }
+        console.info('[BIOS] wrote', fileName, '(' + u8.length + ' bytes) to:', written);
+        return written.length > 0;
+    } catch (e) {
+        console.warn('injectBios failed', e);
+        return false;
+    }
+}
+
 // Called once the emulator is running
 async function beginSaveSync(gameName) {
     if (_savStarted || gameName !== _currentGameName) return;
     if (!getEmu()) return;
     _savStarted = true;
     _savGame    = gameName;
+
+    // Put the custom BIOS where the core can see it, then reboot once so it is used.
+    try {
+        if (await injectBios(gameName)) {
+            setTimeout(() => { try { getEmu().gameManager.restart(); } catch (e) { console.warn(e); } }, 900);
+        }
+    } catch (e) { console.warn('BIOS step failed', e); }
 
     try {
         const stored = toU8(await getGameSave(SAV_PREFIX + gameName));
@@ -2691,7 +2773,9 @@ async function launchEmulator(file, gameName) {
     window.EJS_startOnLoaded = true;
     window.EJS_pathtodata    = 'https://cdn.emulatorjs.org/stable/data/';
     window.EJS_gameUrl       = gameUrl;
-    if (biosUrl) window.EJS_biosUrl = biosUrl;
+    if (biosUrl) window.EJS_biosUrl = biosUrl; else delete window.EJS_biosUrl;
+    // With a real BIOS present, show the boot logo; otherwise keep the fast boot.
+    if (coreName === 'gba') window.EJS_defaultOptions = { mgba_use_bios: 'ON', mgba_skip_bios: biosUrl ? 'OFF' : 'ON' };
 
     window.EJS_Buttons = {
         0: 88, 1: 90, 2: 83, 3: 65,
