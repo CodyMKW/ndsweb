@@ -2041,6 +2041,14 @@ async function injectBios(gameName) {
         const dirs = new Set(['/', '/system', '/home/web_user/retroarch/userdata/system', '/home/web_user/retroarch/system']);
         fsFindDirs(FS, n => n.toLowerCase() === 'system').forEach(d => dirs.add(d));
 
+        // If EmulatorJS already saved it under the right name, the core had it at load time.
+        const already = [...dirs].map(d => (d === '/' ? '' : d) + '/' + fileName)
+            .filter(p => { try { return FS.analyzePath(p).exists; } catch (e) { return false; } });
+        if (already.length) {
+            console.info('[BIOS] already present before injection, no reboot needed:', already);
+            return false;
+        }
+
         const written = [];
         for (const dir of dirs) {
             try {
@@ -2773,7 +2781,15 @@ async function launchEmulator(file, gameName) {
     window.EJS_startOnLoaded = true;
     window.EJS_pathtodata    = 'https://cdn.emulatorjs.org/stable/data/';
     window.EJS_gameUrl       = gameUrl;
-    if (biosUrl) window.EJS_biosUrl = biosUrl; else delete window.EJS_biosUrl;
+    // EmulatorJS names the BIOS file after the last part of the URL. A blob: URL ends in a
+    // random ID, so the core never finds it. A "#/<name>" suffix is ignored when fetching
+    // the blob but gives the file its proper name, and it exists before the game loads.
+    if (biosUrl) {
+        const biosFileName = coreName === 'gba' ? 'gba_bios.bin' : (lower.endsWith('.gbc') ? 'gbc_bios.bin' : 'gb_bios.bin');
+        window.EJS_biosUrl = biosUrl + '#/' + biosFileName;
+    } else {
+        delete window.EJS_biosUrl;
+    }
     // With a real BIOS present, show the boot logo; otherwise keep the fast boot.
     if (coreName === 'gba') window.EJS_defaultOptions = { mgba_use_bios: 'ON', mgba_skip_bios: biosUrl ? 'OFF' : 'ON' };
 
