@@ -2895,11 +2895,16 @@ async function launchEmulator(file, gameName) {
     document.getElementById('now-playing-title').textContent = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
 
     applyRotation(loadRotation(gameName));
-    const gameUrl = trackURL(URL.createObjectURL(file));
+    let gameUrl = trackURL(URL.createObjectURL(file));
+    // Genesis Plus GX picks Game Gear mode from the file extension, and EmulatorJS has no
+    // filename for a blob: URL, so hand it one (name hint after '#', ignored when fetching).
+    const needsExt = lower.endsWith('.gg');
+    if (needsExt) gameUrl += '#/game.gg';
 
     window.EJS_player        = '#game-container';
     window.EJS_core          = coreName;
-    window.EJS_gameName      = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
+    // Keep the extension for .gg so the core can tell what system the file is for
+    window.EJS_gameName      = needsExt ? gameName : gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
     window.EJS_color         = window._accentHex || '#10b981';
     window.EJS_startOnLoaded = true;
     window.EJS_pathtodata    = 'https://cdn.emulatorjs.org/stable/data/';
