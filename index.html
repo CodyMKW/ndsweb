@@ -5,17 +5,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>NDSWeb — Play NDS, GBA, &amp; Retro Games in Your Browser</title>
-    <meta name="description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, and SNES games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
+    <meta name="description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, SNES, Game Gear, and Atari 2600 games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
 
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://codymkw.nekoweb.org/emulator">
     <meta property="og:title" content="NDSWeb — Play NDS, GBA, &amp; Retro Games in Your Browser">
-    <meta property="og:description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, and SNES games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
+    <meta property="og:description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, SNES, Game Gear, and Atari 2600 games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
     <meta property="og:image" content="/assets/images/controller.png">
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="https://codymkw.nekoweb.org/emulator">
     <meta property="twitter:title" content="NDSWeb — Play NDS, GBA, &amp; Retro Games in Your Browser">
-    <meta property="twitter:description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, and SNES games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
+    <meta property="twitter:description" content="Play your favorite Nintendo DS, GBA, GB, GBC, NES, SNES, Game Gear, and Atari 2600 games directly online with NDSWeb. Enjoy a clean launcher interface with secure local save state auto-tracking.">
     <meta property="twitter:image" content="/assets/images/controller.png">
 
     <script src="https://unpkg.com/lucide@0.383.0/dist/umd/lucide.min.js"></script>
@@ -998,6 +998,11 @@
             font-size: 0.65rem; font-weight: 700; padding: 0.15rem 0.35rem; border-radius: 0.35rem;
             background: var(--accent-bg); color: var(--accent);
         }
+        .save-row { display:flex; align-items:center; gap:.6rem; padding:.6rem .75rem; border-radius:.75rem;
+                    background:rgba(37,37,51,.5); border:1px solid var(--white-5); margin-bottom:.5rem; }
+        .save-info { flex:1; min-width:0; }
+        .save-title { font-weight:600; font-size:.875rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .save-sub { font-size:.7rem; color:#9ca3af; margin-top:.1rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .lib-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     </style>
 </head>
@@ -1063,9 +1068,9 @@
                             <i data-lucide="upload-cloud" class="dz-icon"></i>
                         </div>
                         <p class="dz-main-text"><strong>Tap to browse</strong> or drag &amp; drop</p>
-                        <p class="dz-sub-text">Supported: .nds, .gba, .gb, .gbc, .nes, .sfc</p>
+                        <p class="dz-sub-text">Supported: .nds, .gba, .gb, .gbc, .nes, .sfc, .gg, .a26</p>
                     </div>
-                    <input type="file" id="file-input" accept=".nds,.gba,.gb,.gbc,.nes,.sfc" />
+                    <input type="file" id="file-input" accept=".nds,.gba,.gb,.gbc,.nes,.sfc,.gg,.a26" />
                 </label>
 
                 <div class="section-header">
@@ -1371,6 +1376,16 @@
                                 <i data-lucide="trash-2" style="width:1rem;height:1rem;"></i> Clear Everything
                             </button>
                         </div>
+                    </div>
+
+                    <!-- Save Manager -->
+                    <div class="glass-panel settings-panel span-2">
+                        <h3><i data-lucide="save"></i> Save Manager
+                            <span id="saves-count" style="font-size:.7rem;font-weight:500;background:var(--white-10);color:#9ca3af;padding:.125rem .5rem;border-radius:9999px;"></span>
+                        </h3>
+                        <p style="font-size:0.8125rem;color:#9ca3af;margin-bottom:1rem;">Every game save and quick state stored in this browser. Rename only changes the label shown here; the game still finds its save.</p>
+                        <input type="text" id="saves-filter" class="text-input" placeholder="Filter saves…" autocomplete="off" oninput="renderSaveManager()" style="margin-bottom:.75rem;" />
+                        <div id="saves-list"></div>
                     </div>
 
                     <!-- Shortcuts + Tips -->
@@ -1873,7 +1888,27 @@ const getAllSaveKeys = () => new Promise((resolve, reject) => {
     req.onerror   = () => reject(req.error);
 });
 
-const saveGameSave = (name, data) => saveToDB(STORE_SAVES, { name, data, timestamp: Date.now() });
+const getSaveRecord = name => new Promise((resolve, reject) => {
+    const req = db.transaction([STORE_SAVES], 'readonly').objectStore(STORE_SAVES).get(name);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror   = () => reject(req.error);
+});
+const deleteSave = name => new Promise((resolve, reject) => {
+    const req = db.transaction([STORE_SAVES], 'readwrite').objectStore(STORE_SAVES).delete(name);
+    req.onsuccess = () => resolve();
+    req.onerror   = () => reject(req.error);
+});
+const saveGameSave = async (name, data) => {
+    let label = null;
+    try { const old = await getSaveRecord(name); label = old && old.label; } catch (e) {}
+    return saveToDB(STORE_SAVES, { name, data, timestamp: Date.now(), ...(label ? { label } : {}) });
+};
+async function setSaveLabel(name, label) {
+    const rec = await getSaveRecord(name);
+    if (!rec) return;
+    if (label) rec.label = label; else delete rec.label;
+    await saveToDB(STORE_SAVES, rec);
+}
 
 // Real game saves (.sav / SRAM / flash) live under "sav:<rom name>".
 // Quick save states keep the legacy key "<rom name>" so old data still works.
@@ -2189,7 +2224,7 @@ async function downloadSav() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = _currentGameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '') + '.sav';
+    a.download = _currentGameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '') + '.sav';
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast('Save downloaded.', 'success');
@@ -2215,6 +2250,78 @@ document.getElementById('btn-load-state').addEventListener('click', triggerLoadS
 document.getElementById('btn-download-sav').addEventListener('click', downloadSav);
 document.getElementById('btn-upload-sav').addEventListener('click', () => document.getElementById('sav-file-input').click());
 document.getElementById('sav-file-input').addEventListener('change', e => { importSavFile(e.target.files[0]); e.target.value = ''; });
+
+// ─────────────────────────────────────────────────────────────
+// SAVE MANAGER
+// ─────────────────────────────────────────────────────────────
+function fmtBytes(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB'; }
+
+function describeSave(rec) {
+    const isGame = rec.name.startsWith(SAV_PREFIX);
+    const rom    = isGame ? rec.name.slice(SAV_PREFIX.length) : rec.name;
+    const bytes  = rec.data ? (rec.data.byteLength ?? rec.data.length ?? 0) : 0;
+    return { isGame, rom, title: libStrip(rom), kind: isGame ? 'Game save' : 'Save state', bytes, badge: getConsoleInfo(rom).badge };
+}
+
+async function renderSaveManager() {
+    const list = document.getElementById('saves-list');
+    if (!list || !db) return;
+    const q = (document.getElementById('saves-filter').value || '').toLowerCase().trim();
+    let saves = [];
+    try { saves = await getAllSaves(); } catch (e) { return; }
+    document.getElementById('saves-count').textContent = saves.length || '';
+
+    const rows = saves.map(r => ({ r, d: describeSave(r) }))
+        .filter(({ r, d }) => !q || d.title.toLowerCase().includes(q) || (r.label || '').toLowerCase().includes(q))
+        .sort((a, b) => (b.r.timestamp || 0) - (a.r.timestamp || 0));
+
+    list.replaceChildren();
+    if (!rows.length) {
+        list.innerHTML = `<div class="empty-state"><div class="empty-state-icon">💾</div>${q ? 'No saves match your filter.' : 'No saves yet. Save in a game and it will show up here.'}</div>`;
+        return;
+    }
+    rows.forEach(({ r, d }) => {
+        const shown = r.label || d.title;
+        const row = document.createElement('div'); row.className = 'save-row';
+
+        const bd = document.createElement('span'); bd.className = 'lib-badge'; bd.textContent = d.badge;
+
+        const info = document.createElement('div'); info.className = 'save-info';
+        const t = document.createElement('div'); t.className = 'save-title'; t.textContent = shown; t.title = shown;
+        const s = document.createElement('div'); s.className = 'save-sub';
+        s.textContent = [d.kind, r.label ? 'Game: ' + d.title : null, fmtBytes(d.bytes), relativeTime(r.timestamp)].filter(Boolean).join(' · ');
+        info.append(t, s);
+
+        const actions = document.createElement('div'); actions.className = 'friend-actions';
+
+        const ren = document.createElement('button'); ren.className = 'mini-btn';
+        ren.innerHTML = '<i data-lucide="pencil"></i> Rename';
+        ren.addEventListener('click', async () => {
+            const v = prompt('Name for this save (leave blank to reset):', r.label || '');
+            if (v === null) return;
+            await setSaveLabel(r.name, v.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60));
+            await renderSaveManager();
+            showToast(v.trim() ? 'Save renamed.' : 'Label reset.', 'success', 2000);
+        });
+
+        const del = document.createElement('button'); del.className = 'mini-btn ghost'; del.title = 'Delete save';
+        del.innerHTML = '<i data-lucide="trash-2"></i>';
+        del.addEventListener('click', () => showModal(
+            'Delete save',
+            `Delete the ${d.kind.toLowerCase()} "${shown}"? This cannot be undone.`,
+            async () => {
+                await deleteSave(r.name);
+                await renderLibrary();
+                updateStorageMeter();
+                showToast('Save deleted.', 'info');
+            }, 'Delete'));
+
+        actions.append(ren, del);
+        row.append(bd, info, actions);
+        list.appendChild(row);
+    });
+    lucide.createIcons({ nodes: [list] });
+}
 
 // ─────────────────────────────────────────────────────────────
 // STORAGE METER
@@ -2267,6 +2374,7 @@ document.getElementById('export-saves-btn').addEventListener('click', async () =
             name:      s.name,
             data:      toBase64(s.data),
             timestamp: s.timestamp,
+            label:     s.label,
         }));
 
         const blob = new Blob([JSON.stringify(exportable, null, 2)], { type: 'application/json' });
@@ -2302,7 +2410,8 @@ document.getElementById('import-saves-input').addEventListener('change', async e
                 data = new Uint8Array(binary.length);
                 for (let i = 0; i < binary.length; i++) data[i] = binary.charCodeAt(i);
             }
-            await saveGameSave(s.name, data);
+            await saveToDB(STORE_SAVES, { name: s.name, data, timestamp: s.timestamp || Date.now(),
+                ...(s.label ? { label: String(s.label).slice(0, 60) } : {}) });
         }
         await renderLibrary();
         showToast(`${saves.length} save${saves.length > 1 ? 's' : ''} imported!`, 'success');
@@ -2370,6 +2479,8 @@ function getConsoleInfo(filename) {
     if (lower.endsWith('.gb'))  return { consoleName: 'Game Boy',         badge: 'GB',  icon: 'gamepad', system: 'Nintendo - Game Boy' };
     if (lower.endsWith('.nes')) return { consoleName: 'Nintendo Entertainment System', badge: 'NES', icon: 'gamepad-2', system: 'Nintendo - Nintendo Entertainment System' };
     if (lower.endsWith('.sfc')) return { consoleName: 'Super Nintendo',   badge: 'SNES', icon: 'gamepad-2', system: 'Nintendo - Super Nintendo Entertainment System' };
+    if (lower.endsWith('.gg'))  return { consoleName: 'Sega Game Gear', badge: 'GG',    icon: 'gamepad',   system: 'Sega - Game Gear' };
+    if (lower.endsWith('.a26')) return { consoleName: 'Atari 2600',     badge: 'ATARI', icon: 'gamepad-2', system: 'Atari - 2600' };
     return                            { consoleName: 'Nintendo DS',        badge: 'NDS', icon: 'tablet-smartphone', system: 'Nintendo - Nintendo DS' };
 }
 
@@ -2398,7 +2509,7 @@ function createGameCard(rom, hasSave = false) {
 
     const grad      = CARD_GRADS[Math.abs(rom.name.split('').reduce((h,c) => h * 31 + c.charCodeAt(0), 0)) % CARD_GRADS.length];
     const info      = getConsoleInfo(rom.name);
-    const cleanName = rom.name.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    const cleanName = rom.name.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
     const coverUrl  = rom.customCover
         || `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(cleanName)}.png`;
 
@@ -2538,6 +2649,7 @@ async function renderLibrary() {
 
         // Library grid (re-apply current filter/sort)
         await applySortAndFilter();
+        await renderSaveManager();
 
         lucide.createIcons({ nodes: [recentGrid] });
     } catch(err) {
@@ -2577,8 +2689,8 @@ fileInput.addEventListener('change', e => { handleFiles(e.target.files); e.targe
 async function handleFiles(files) {
     if (!files.length) return;
     const file  = files[0];
-    const valid = ['.nds','.gba','.gb','.gbc','.nes','.sfc'].some(ext => file.name.toLowerCase().endsWith(ext));
-    if (!valid) { showToast('Please upload a valid .nds, .gba, .gb, .gbc, .nes, or .sfc file.', 'error'); return; }
+    const valid = ['.nds','.gba','.gb','.gbc','.nes','.sfc','.gg','.a26'].some(ext => file.name.toLowerCase().endsWith(ext));
+    if (!valid) { showToast('Please upload a valid .nds, .gba, .gb, .gbc, .nes, .sfc, .gg, or .a26 file.', 'error'); return; }
     try {
         await saveROM(file);
         await renderLibrary();
@@ -2714,6 +2826,8 @@ async function launchEmulator(file, gameName) {
     else if (lower.endsWith('.gb') || lower.endsWith('.gbc')) { coreName = 'gb';  coreDisplayName = 'Gambatte'; }
     else if (lower.endsWith('.nes'))                   { coreName = 'nes';  coreDisplayName = 'FCEUmm'; }
     else if (lower.endsWith('.sfc'))                   { coreName = 'snes'; coreDisplayName = 'Snes9x';  }
+    else if (lower.endsWith('.gg'))                    { coreName = 'segaGG';    coreDisplayName = 'Genesis Plus GX'; }
+    else if (lower.endsWith('.a26'))                   { coreName = 'atari2600'; coreDisplayName = 'Stella'; }
 
     _currentGameName = gameName;
     _lastSaveData    = null;
@@ -2778,14 +2892,14 @@ async function launchEmulator(file, gameName) {
 
     const emuWrapper = document.getElementById('emulator-wrapper');
     emuWrapper.classList.add('active');
-    document.getElementById('now-playing-title').textContent = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    document.getElementById('now-playing-title').textContent = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
 
     applyRotation(loadRotation(gameName));
     const gameUrl = trackURL(URL.createObjectURL(file));
 
     window.EJS_player        = '#game-container';
     window.EJS_core          = coreName;
-    window.EJS_gameName      = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    window.EJS_gameName      = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
     window.EJS_color         = window._accentHex || '#10b981';
     window.EJS_startOnLoaded = true;
     window.EJS_pathtodata    = 'https://cdn.emulatorjs.org/stable/data/';
@@ -3261,7 +3375,7 @@ function setShare(on) {
 function p2pOnGameStart(gameName) {
     if (_p2pStartedFor === gameName) return;
     _p2pStartedFor = gameName;
-    _p2pLive  = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    _p2pLive  = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
     _p2pBadge = getConsoleInfo(gameName).badge;
     broadcastPresence();
     if (_p2pShare) P2P.watchers.forEach(id => startCall(id));
@@ -3772,7 +3886,7 @@ function sendChatMessage() {
 let _libShare = localStorage.getItem('ndsweb_lib_share') !== '0';
 const _libView = { id: null, tab: 'both', q: '' };
 const LIB_MAX = 2000;
-const libStrip = n => String(n).replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+const libStrip = n => String(n).replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
 function libKey(g) {
     // same game across regions/revisions: drop "(USA)" / "[!]" tags, case and punctuation; keep the console
     return libStrip(g.n).toLowerCase().replace(/\s*[\(\[][^)\]]*[\)\]]/g, '').replace(/[^a-z0-9]+/g, '') + '|' + g.b;
@@ -3870,7 +3984,7 @@ let _romShare = ['auto', 'ask', 'off'].includes(localStorage.getItem('ndsweb_rom
     ? localStorage.getItem('ndsweb_rom_share') : 'auto';
 const ROM_CHUNK = 64 * 1024;
 const ROM_MAX   = 512 * 1024 * 1024;
-const ROM_EXT   = /\.(nds|gba|gb|gbc|nes|sfc)$/i;
+const ROM_EXT   = /\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i;
 const _romIn      = new Map();   // friendId -> transfer in progress (I am receiving)
 const _romWanted  = new Map();   // friendId -> Set of lowercase titles I asked for
 const _romOutBusy = new Set();   // friendIds I am currently sending to
@@ -4295,7 +4409,7 @@ function dcImageLoads(url) {
 // that is shown instead. Everything is rebuilt from live state by dcRefresh(),
 // which is debounced (Discord limits how often presence may change).
 const DC_WATCH_TYPE = 3;                    // 3 = "Watching <game>"; set to 0 if Discord ignores it
-const DC_BADGE_EXT  = { NDS: '.nds', GBA: '.gba', GBC: '.gbc', GB: '.gb', NES: '.nes', SNES: '.sfc' };
+const DC_BADGE_EXT  = { NDS: '.nds', GBA: '.gba', GBC: '.gbc', GB: '.gb', NES: '.nes', SNES: '.sfc', GG: '.gg', ATARI: '.a26' };
 const dcShowNames   = () => localStorage.getItem('ndsweb_dc_names') === '1';
 const dcPretty      = clean => clean.replace(/\s*\([^)]*\)/g, '').trim() || clean;   // drop "(USA, Europe) (Rev 1)" tags for display
 const dcBoxArt      = (info, clean) => `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(clean)}.png`;
@@ -4308,7 +4422,7 @@ function dcDescribe() {
     if (_dc.game) {
         const key   = 'play:' + _dc.game;
         const info  = getConsoleInfo(_dc.game);
-        const pretty = dcPretty(_dc.game.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, ''));
+        const pretty = dcPretty(_dc.game.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, ''));
         const bits  = ['on NDSWeb'];
         const w = P2P.watchers.size;
         if (w > 0) bits.push(w + ' watching');
@@ -4359,7 +4473,7 @@ function dcRefresh() {
 
 async function dcOwnCover(gameName, key) {
     const info  = getConsoleInfo(gameName);
-    const clean = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc)$/i, '');
+    const clean = gameName.replace(/\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i, '');
     let rom = null;
     try { rom = await getROM(gameName); } catch (e) { /* fall back to box art */ }
     const custom = rom && rom.customCover;
