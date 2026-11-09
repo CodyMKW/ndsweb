@@ -2,7 +2,7 @@
 
 Play Nintendo DS, Game Boy Advance, Game Boy, NES, SNES, Game Gear, and Atari 2600 games right inside your browser. No installs, no accounts, no backend. Drop your ROMs in and start playing, then invite a friend to watch (or play along) over a peer-to-peer connection.
 
-🌐 **Live:** [codymkw.github.io/ndsweb](https://codymkw.github.io/ndsweb) · mirror at [codymkw.nekoweb.org/emulator](https://codymkw.nekoweb.org/emulator)
+🌐 **Live:** [codymkw.github.io/ndsweb](https://codymkw.github.io/ndsweb)
 
 ---
 
