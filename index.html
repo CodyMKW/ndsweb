@@ -1623,6 +1623,20 @@ let _objectURLs = [];          // URLs to revoke on quit
 let _lastSaveData = null;      // most recent save state data
 let _allRoms = [];             // cached ROM list for sort/filter
 
+// lucide@0.383 ignores the `nodes` option and re-renders EVERY icon on the page on each call
+// (rendered <svg>s keep their data-lucide attribute, so they get matched again). Drop the
+// attribute once an icon is rendered so later calls only touch new <i data-lucide> placeholders.
+(function () {
+    if (!window.lucide || !lucide.createIcons) return;
+    const orig = lucide.createIcons.bind(lucide);
+    lucide.createIcons = function () {
+        orig();
+        document.querySelectorAll('svg[data-lucide]').forEach(el => el.removeAttribute('data-lucide'));
+    };
+})();
+
+const viewVisible = v => { const el = document.getElementById('view-' + v); return !!el && !el.classList.contains('view-hidden'); };
+
 // ─────────────────────────────────────────────────────────────
 // ACCENT COLORS
 // ─────────────────────────────────────────────────────────────
@@ -1648,8 +1662,7 @@ function applyAccent(color) {
         s.classList.toggle('selected', s.dataset.hex === color.hex));
     const glowEl = document.getElementById('ambient-glow');
     if (glowEl) glowEl.style.background = color.hex;
-    // Re-render so card play-buttons update accent
-    renderLibrary();
+    // (no library re-render needed: cards read the accent from CSS variables)
 }
 
 function buildColorSwatches() {
@@ -1786,7 +1799,7 @@ function switchView(viewName) {
         if (icon) icon.style.filter = 'drop-shadow(0 0 8px var(--accent-glow))';
     }
 
-    if (viewName === 'settings') updateStorageMeter();
+    if (viewName === 'settings') { updateStorageMeter(); renderSaveManager(); }
     if (viewName === 'library') applySortAndFilter();
     if (viewName === 'connect') renderFriends();
 }
@@ -1814,7 +1827,11 @@ let db;
 const initDB = () => new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onerror = e => reject('Database error: ' + e.target.error);
-    request.onsuccess = e => { db = e.target.result; resolve(db); };
+    request.onsuccess = e => {
+        db = e.target.result;
+        db.onversionchange = () => db.close();      // never block an upgrade in another tab
+        resolve(db);
+    };
     request.onupgradeneeded = e => {
         const d = e.target.result;
         if (!d.objectStoreNames.contains(STORE_ROMS))  d.createObjectStore(STORE_ROMS,  { keyPath: 'name' });
@@ -1823,20 +1840,29 @@ const initDB = () => new Promise((resolve, reject) => {
 });
 
 // FIX: saveToDB accepts any object and wraps File separately so BIOS entries work correctly
+// Resolves when the transaction has COMMITTED (not just when the request was queued), so
+// "await saveToDB(...)" before a reload really means the data is on disk. Quota errors
+// surface as an aborted transaction.
 const saveToDB = (store, record) => new Promise((resolve, reject) => {
-    const tx  = db.transaction([store], 'readwrite');
-    const req = tx.objectStore(store).put(record);
-    req.onsuccess = () => resolve();
-    req.onerror   = () => reject(req.error);
+    const tx = db.transaction([store], 'readwrite');
+    tx.objectStore(store).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onabort    = () => reject(tx.error || new Error('Transaction aborted'));
 });
 
-const saveROM = (file) => saveToDB(STORE_ROMS, {
-    name:       file.name,
-    data:       file,
-    timestamp:  Date.now(),
-    lastPlayed: Date.now(),
-    size:       (file.size / (1024 * 1024)).toFixed(2) + ' MB'
-});
+const saveROM = async (file) => {
+    // Re-adding a game you already have keeps its custom cover and original "date added".
+    let old = null;
+    try { old = await getROM(file.name); } catch (e) { /* first time */ }
+    return saveToDB(STORE_ROMS, {
+        name:       file.name,
+        data:       file,
+        timestamp:  (old && old.timestamp) || Date.now(),
+        lastPlayed: Date.now(),
+        size:       (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+        ...(old && old.customCover ? { customCover: old.customCover } : {})
+    });
+};
 
 // FIX: saveBIOS stores a proper File object (previously a plain object was stored)
 const saveBIOS = (key, file) => saveToDB(STORE_ROMS, {
@@ -1898,11 +1924,33 @@ const deleteSave = name => new Promise((resolve, reject) => {
     req.onsuccess = () => resolve();
     req.onerror   = () => reject(req.error);
 });
-const saveGameSave = async (name, data) => {
-    let label = null;
-    try { const old = await getSaveRecord(name); label = old && old.label; } catch (e) {}
-    return saveToDB(STORE_SAVES, { name, data, timestamp: Date.now(), ...(label ? { label } : {}) });
-};
+// Read-then-write in ONE transaction so a rename can never be lost to a concurrent autosync.
+const saveGameSave = (name, data) => new Promise((resolve, reject) => {
+    const tx    = db.transaction([STORE_SAVES], 'readwrite');
+    const store = tx.objectStore(STORE_SAVES);
+    const get   = store.get(name);
+    get.onsuccess = () => {
+        const old = get.result;
+        store.put({ name, data, timestamp: Date.now(), ...(old && old.label ? { label: old.label } : {}) });
+    };
+    tx.oncomplete = () => resolve();
+    tx.onabort    = () => reject(tx.error || new Error('Transaction aborted'));
+});
+// Metadata only (name/label/time/size), read one record at a time so we never hold every
+// save state (NDS states are several MB each) in memory at once.
+const listSaveMeta = () => new Promise((resolve, reject) => {
+    const out = [];
+    const req = db.transaction([STORE_SAVES], 'readonly').objectStore(STORE_SAVES).openCursor();
+    req.onsuccess = () => {
+        const c = req.result;
+        if (!c) { resolve(out); return; }
+        const v = c.value || {};
+        out.push({ name: c.key, label: v.label || null, timestamp: v.timestamp || 0,
+                   bytes: v.data ? (v.data.byteLength ?? v.data.length ?? 0) : 0 });
+        c.continue();
+    };
+    req.onerror = () => reject(req.error);
+});
 async function setSaveLabel(name, label) {
     const rec = await getSaveRecord(name);
     if (!rec) return;
@@ -2018,22 +2066,43 @@ function injectSave(u8, { restart = true } = {}) {
 }
 
 // Store the live save in IndexedDB if it changed. Returns true if written.
+let _flushBusy = null;
 async function flushSave({ force = false, quiet = true } = {}) {
     if (!_savGame || !db) return false;
+    if (_flushBusy) {
+        // tab-hide + pagehide + beforeunload all fire together: don't write the same bytes 3 times
+        if (!force) return false;
+        try { await _flushBusy; } catch (e) { /* reported by the first writer */ }
+    }
     const live = readLiveSave();
     if (!live || isBlankSave(live)) return false;
-    const h = hashBytes(live);
+    const h    = hashBytes(live);
+    const game = _savGame;
     if (!force && h === _savHash) return false;
     try {
-        await saveGameSave(SAV_PREFIX + _savGame, live);
-        _savHash = h;
+        _flushBusy = saveGameSave(SAV_PREFIX + game, live);
+        await _flushBusy;
+        if (_savGame === game) _savHash = h;
+        requestPersistentStorage();
         if (!quiet) showToast('Game save stored!', 'success', 1800);
         return true;
     } catch(e) {
         console.error('flushSave failed', e);
         showToast('Could not store your game save (storage full or blocked?).', 'error');
         return false;
+    } finally {
+        _flushBusy = null;
     }
+}
+
+// Browsers may evict a site's IndexedDB under storage pressure (Safari also after ~7 days
+// without a visit) unless the site is marked persistent. Ask once, after the first real save.
+function requestPersistentStorage() {
+    try {
+        if (localStorage.getItem('ndsweb_persist_asked') === '1') return;
+        localStorage.setItem('ndsweb_persist_asked', '1');
+        if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    } catch (e) { /* storage blocked */ }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2164,7 +2233,8 @@ async function beginSaveSync(gameName) {
 // Called by EmulatorJS (and by a fallback poller below)
 function onEmulatorStarted(gameName) {
     // give the core a moment to finish booting before we touch its filesystem
-    setTimeout(() => { beginSaveSync(gameName); if (typeof p2pOnGameStart === 'function') p2pOnGameStart(gameName); if (typeof discordOnGameStart === 'function') discordOnGameStart(gameName); }, 1200);
+    setTimeout(() => { if (gameName !== _currentGameName) return;   // quit before the core finished booting
+        beginSaveSync(gameName); if (typeof p2pOnGameStart === 'function') p2pOnGameStart(gameName); if (typeof discordOnGameStart === 'function') discordOnGameStart(gameName); }, 1200);
 }
 
 function stopSaveSync() {
@@ -2259,7 +2329,7 @@ function fmtBytes(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toF
 function describeSave(rec) {
     const isGame = rec.name.startsWith(SAV_PREFIX);
     const rom    = isGame ? rec.name.slice(SAV_PREFIX.length) : rec.name;
-    const bytes  = rec.data ? (rec.data.byteLength ?? rec.data.length ?? 0) : 0;
+    const bytes  = rec.bytes ?? (rec.data ? (rec.data.byteLength ?? rec.data.length ?? 0) : 0);
     return { isGame, rom, title: libStrip(rom), kind: isGame ? 'Game save' : 'Save state', bytes, badge: getConsoleInfo(rom).badge };
 }
 
@@ -2268,7 +2338,7 @@ async function renderSaveManager() {
     if (!list || !db) return;
     const q = (document.getElementById('saves-filter').value || '').toLowerCase().trim();
     let saves = [];
-    try { saves = await getAllSaves(); } catch (e) { return; }
+    try { saves = await listSaveMeta(); } catch (e) { return; }
     document.getElementById('saves-count').textContent = saves.length || '';
 
     const rows = saves.map(r => ({ r, d: describeSave(r) }))
@@ -2402,19 +2472,25 @@ document.getElementById('import-saves-input').addEventListener('change', async e
         const saves = JSON.parse(text);
         if (!Array.isArray(saves)) throw new Error('Invalid format');
 
+        let imported = 0;
         for (const s of saves) {
-            let data = s.data;
-            // Re-decode Base64 back to Uint8Array
-            if (typeof data === 'string') {
-                const binary = atob(data);
-                data = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) data[i] = binary.charCodeAt(i);
-            }
-            await saveToDB(STORE_SAVES, { name: s.name, data, timestamp: s.timestamp || Date.now(),
-                ...(s.label ? { label: String(s.label).slice(0, 60) } : {}) });
+            if (!s || typeof s.name !== 'string' || !s.name) continue;      // a record without a key would abort the write
+            try {
+                let data = s.data;
+                // Re-decode Base64 back to Uint8Array
+                if (typeof data === 'string') {
+                    const binary = atob(data);
+                    data = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) data[i] = binary.charCodeAt(i);
+                } else if (!data) continue;
+                await saveToDB(STORE_SAVES, { name: s.name, data, timestamp: s.timestamp || Date.now(),
+                    ...(s.label ? { label: String(s.label).slice(0, 60) } : {}) });
+                imported++;
+            } catch (entryErr) { console.warn('Skipped a bad save entry:', s.name, entryErr); }
         }
+        if (!imported) throw new Error('No valid saves in file');
         await renderLibrary();
-        showToast(`${saves.length} save${saves.length > 1 ? 's' : ''} imported!`, 'success');
+        showToast(`${imported} save${imported > 1 ? 's' : ''} imported!` + (imported < saves.length ? ` (${saves.length - imported} skipped)` : ''), 'success');
     } catch(err) {
         showToast('Import failed — invalid file.', 'error');
         console.error(err);
@@ -2429,12 +2505,12 @@ function filterLibrary(query) {
     applySortAndFilter(query);
 }
 
-async function applySortAndFilter(overrideQuery) {
-    const query   = overrideQuery !== undefined ? overrideQuery
-                  : (document.getElementById('library-search').value || '').toLowerCase().trim();
+async function applySortAndFilter(overrideQuery, saveKeys) {
+    // Normalise here: phone keyboards capitalise the first letter, and filterLibrary() hands us the raw text.
+    const query   = (overrideQuery !== undefined ? overrideQuery
+                  : (document.getElementById('library-search').value || '')).toLowerCase().trim();
     const sortVal = document.getElementById('sort-select').value;
 
-    if (!_allRoms.length) return;
     const roms = _allRoms.filter(r => !r.name.startsWith('_bios_'));
 
     // Filter
@@ -2450,9 +2526,9 @@ async function applySortAndFilter(overrideQuery) {
         return (b.lastPlayed || 0) - (a.lastPlayed || 0); // recent
     });
 
-    const saveKeys = await getAllSaveKeys();
-    const grid     = document.getElementById('library-games-grid');
-    grid.innerHTML  = '';
+    if (!saveKeys) { try { saveKeys = db ? await getAllSaveKeys() : []; } catch (e) { saveKeys = []; } }
+    const grid = document.getElementById('library-games-grid');
+    grid.innerHTML = '';
 
     if (filtered.length === 0 && query) {
         document.getElementById('library-no-results').classList.remove('hidden');
@@ -2502,6 +2578,14 @@ function relativeTime(ts) {
 // ─────────────────────────────────────────────────────────────
 const CARD_GRADS = ['grad-1','grad-2','grad-3','grad-4','grad-5','grad-6'];
 
+// Box-art URLs that already failed this session. Cards are rebuilt often, and the thumbnail
+// server answers 404 for most hacks/homebrew, so don't ask again every time.
+const _coverBad = (() => { try { return new Set(JSON.parse(sessionStorage.getItem('ndsweb_cover_bad') || '[]')); } catch (e) { return new Set(); } })();
+function markCoverBad(url) {
+    _coverBad.add(url);
+    try { sessionStorage.setItem('ndsweb_cover_bad', JSON.stringify([..._coverBad].slice(-300))); } catch (e) {}
+}
+
 function createGameCard(rom, hasSave = false) {
     const card = document.createElement('div');
     card.className = 'glass-panel game-card';
@@ -2513,27 +2597,28 @@ function createGameCard(rom, hasSave = false) {
     const coverUrl  = rom.customCover
         || `https://thumbnails.libretro.com/${encodeURI(info.system)}/Named_Boxarts/${encodeURIComponent(cleanName)}.png`;
 
+    const safeName = escHtml(cleanName);
     card.innerHTML = `
-        <button class="card-edit-btn" title="Set custom cover" aria-label="Edit cover for ${cleanName}">
+        <button class="card-edit-btn" title="Set custom cover" aria-label="Edit cover for ${safeName}">
             <i data-lucide="image"></i>
         </button>
-        <button class="card-delete-btn" title="Remove from library" aria-label="Delete ${cleanName}">
+        <button class="card-delete-btn" title="Remove from library" aria-label="Delete ${safeName}">
             <i data-lucide="x" style="width:0.75rem;height:0.75rem;"></i>
         </button>
         <div class="card-art ${grad}">
             <div class="card-art-shimmer"></div>
             <img class="card-art-bg" alt="" loading="lazy" />
-            <img class="card-art-fg" alt="Cover art for ${cleanName}" loading="lazy" />
+            <img class="card-art-fg" alt="Cover art for ${safeName}" loading="lazy" />
             <i data-lucide="${info.icon}" class="card-art-icon"></i>
             <div class="card-art-overlay"></div>
             <span class="card-art-badge">${info.badge}</span>
         </div>
-        <h4 class="card-name" title="${cleanName}">${cleanName}</h4>
+        <h4 class="card-name" title="${safeName}">${safeName}</h4>
         <div class="card-meta">
             <span class="console">${info.consoleName}</span>
             <div class="card-meta-right">
                 ${hasSave ? '<span class="save-icon" title="Save data exists"><i data-lucide="save"></i></span>' : ''}
-                <span>${rom.size}</span>
+                <span>${escHtml(rom.size)}</span>
             </div>
         </div>
         <div class="card-time">
@@ -2562,10 +2647,14 @@ function createGameCard(rom, hasSave = false) {
         fgImg.remove();
     };
 
-    bgImg.onload  = revealCover;
-    bgImg.onerror = hideCover;
-    bgImg.src     = coverUrl;
-    fgImg.src     = coverUrl;
+    if (_coverBad.has(coverUrl)) {
+        hideCover();
+    } else {
+        bgImg.onload  = revealCover;
+        bgImg.onerror = () => { markCoverBad(coverUrl); hideCover(); };
+        bgImg.src     = coverUrl;
+        fgImg.src     = coverUrl;
+    }
 
     // Play
     const playBtn = card.querySelector('.play-btn');
@@ -2581,7 +2670,7 @@ function createGameCard(rom, hasSave = false) {
             async () => {
                 await deleteROM(rom.name);
                 await renderLibrary();
-                showToast(`"${cleanName}" removed.`, 'info');
+                showToast(`"${escHtml(cleanName)}" removed.`, 'info');
             }
         );
     });
@@ -2647,9 +2736,10 @@ async function renderLibrary() {
             recentRoms.forEach(rom => recentGrid.appendChild(createGameCard(rom, hasAnySave(saveKeys, rom.name))));
         }
 
-        // Library grid (re-apply current filter/sort)
-        await applySortAndFilter();
-        await renderSaveManager();
+        // The library grid and Save Manager are only rebuilt while their tab is open;
+        // switchView() rebuilds them when you navigate there.
+        if (viewVisible('library'))  await applySortAndFilter(undefined, saveKeys);
+        if (viewVisible('settings')) await renderSaveManager();
 
         lucide.createIcons({ nodes: [recentGrid] });
     } catch(err) {
@@ -3200,8 +3290,7 @@ function handleClose(conn) {
     const rec = P2P.conns.get(id);
     if (!rec || rec.conn !== conn) return;
     P2P.conns.delete(id);
-    P2P.watchers.delete(id);
-    if (P2P.watchers.delete(id)) updateWatcherUI();
+    if (P2P.watchers.delete(id)) updateWatcherUI();      // (was deleting first, so the badge never refreshed)
     const call = P2P.calls.get(id);
     if (call) { try { call.close(); } catch (e) {} P2P.calls.delete(id); }
     if (P2P.watching === id) setWatchStatus(`${rec.name} disconnected. Waiting for them to come back…`);
@@ -3223,9 +3312,9 @@ function handleMsg(conn, msg) {
             applyPresence(rec, msg);
             afterPresence(id);
             break;
-        case 'chat':                                        
-            appendChatMessage(rec.name || 'Friend', msg.text); 
-            break;                                           
+        case 'chat':
+            if (rec.accepted) appendChatMessage(rec.name || 'Friend', msg.text);   // strangers awaiting approval can't message you
+            break;
         case 'lib-req':     if (rec.accepted) onLibRequest(rec); break;
         case 'lib':         if (rec.accepted) onLibData(rec, msg); break;
         case 'lib-denied':  if (rec.accepted && _libView.id === id) { rec.libDenied = true; renderLibCompare(); } break;
@@ -3542,6 +3631,7 @@ function syncCtlBtn() {
     dcSchedule();
     const b = document.getElementById('wp-control');
     if (b) { b.classList.toggle('active', _ctl.on); b.title = _ctl.on ? 'Stop playing as Player 2' : 'Play as Player 2 (needs host permission)'; }
+    ensurePadLoop();
 }
 function stopControl(notify) {
     if (_ctl.on) {
@@ -3579,8 +3669,12 @@ document.addEventListener('keyup', e => {
     ctlPress(i, 0);
 });
 window.addEventListener('blur', () => { [..._ctl.held].forEach(i => ctlPress(i, 0)); });
-(function padLoop() {
-    if (_ctl.on && navigator.getGamepads) {
+// Polled only while I'm Player 2 on someone's stream (it used to spin every frame, forever).
+let _padRaf = 0;
+function padLoop() {
+    _padRaf = 0;
+    if (!_ctl.on) return;
+    if (navigator.getGamepads) {
         const down = new Set();
         for (const gp of navigator.getGamepads()) {
             if (!gp) continue;
@@ -3592,8 +3686,9 @@ window.addEventListener('blur', () => { [..._ctl.held].forEach(i => ctlPress(i, 
         down.forEach(i => { if (!_ctl.pad.has(i)) { _ctl.pad.add(i); ctlPress(i, 1); } });
         [..._ctl.pad].forEach(i => { if (!down.has(i)) { _ctl.pad.delete(i); ctlPress(i, 0); } });
     }
-    requestAnimationFrame(padLoop);
-})();
+    _padRaf = requestAnimationFrame(padLoop);
+}
+function ensurePadLoop() { if (_ctl.on && !_padRaf) _padRaf = requestAnimationFrame(padLoop); }
 function bindControlUI() {
     document.querySelectorAll('#control-toggles .seg-btn').forEach(b =>
         b.addEventListener('click', () => setControl(b.dataset.ctl === '1')));
@@ -3762,23 +3857,9 @@ function bindP2PUI() {
 // --- ADD THESE LINES INSIDE bindP2PUI() ---
     const sendWpChat = () => {
         const input = document.getElementById('wp-chat-input');
-        const text = input.value.trim();
-        if (!text) return;
-
-        let sent = false;
-        P2P.conns.forEach(rec => {
-            if (rec.accepted && rec.open) {
-                safeSend(rec.conn, { t: 'chat', text });
-                sent = true;
-            }
-        });
-
-        if (sent) {
-            appendChatMessage('You', text);
-            input.value = '';
-        } else {
-            showToast('Not connected to anyone!', 'warn');
-        }
+        if (!input.value.trim()) return;
+        if (broadcastChat(input.value)) input.value = '';
+        else showToast('Not connected to anyone!', 'warn');
     };
 
     document.getElementById('wp-chat-send').addEventListener('click', sendWpChat);
@@ -3802,23 +3883,9 @@ function bindP2PUI() {
 
     const sendEmuChat = () => {
         const input = document.getElementById('emu-chat-input');
-        const text = input.value.trim();
-        if (!text) return;
-
-        let sent = false;
-        P2P.conns.forEach(rec => {
-            if (rec.accepted && rec.open) {
-                safeSend(rec.conn, { t: 'chat', text });
-                sent = true;
-            }
-        });
-
-        if (sent) {
-            appendChatMessage('You', text);
-            input.value = '';
-        } else {
-            showToast('Not connected to anyone!', 'warn');
-        }
+        if (!input.value.trim()) return;
+        if (broadcastChat(input.value)) input.value = '';
+        else showToast('Not connected to anyone!', 'warn');
     };
 
     document.getElementById('emu-chat-send').addEventListener('click', sendEmuChat);
@@ -3828,61 +3895,45 @@ function bindP2PUI() {
     });
 }
 
+const CHAT_MAX_LEN   = 500;
+const CHAT_MAX_LINES = 200;
 function appendChatMessage(sender, text) {
-    // 1. Connect page chat log
-    const log = document.getElementById('p2p-chat-log');
-    if (log) {
-        if (log.firstElementChild && log.firstElementChild.style.fontStyle === 'italic') log.innerHTML = '';
-        const div = document.createElement('div');
-        div.style.wordBreak = 'break-word';
-        div.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
-        log.appendChild(div);
+    text = String(text == null ? '' : text).replace(/[\u0000-\u001f]/g, ' ').slice(0, CHAT_MAX_LEN);
+    if (!text.trim()) return;
+    // The same conversation is mirrored in the Connect tab, the watch panel and the in-game popup
+    ['p2p-chat-log', 'wp-chat-log', 'emu-chat-log'].forEach(id => {
+        const log = document.getElementById(id);
+        if (!log) return;
+        if (log.firstElementChild && log.firstElementChild.style.fontStyle === 'italic') log.innerHTML = '';   // drop the placeholder
+        const row = document.createElement('div');
+        row.style.wordBreak = 'break-word';
+        const who = document.createElement('strong');
+        who.style.color = 'var(--accent)';
+        who.textContent = sender + ':';
+        row.append(who, ' ' + text);                      // text nodes: nothing a friend sends is ever parsed as HTML
+        log.appendChild(row);
+        while (log.childElementCount > CHAT_MAX_LINES) log.firstElementChild.remove();   // don't grow forever
         log.scrollTop = log.scrollHeight;
-    }
+    });
+}
 
-    // 2. Watch panel chat log
-    const wpLog = document.getElementById('wp-chat-log');
-    if (wpLog) {
-        if (wpLog.firstElementChild && wpLog.firstElementChild.style.fontStyle === 'italic') wpLog.innerHTML = '';
-        const divWp = document.createElement('div');
-        divWp.style.wordBreak = 'break-word';
-        divWp.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
-        wpLog.appendChild(divWp);
-        wpLog.scrollTop = wpLog.scrollHeight;
-    }
-
-    // 3. Emulator In-Game chat log <--- ADD THIS BLOCK
-    const emuChatLog = document.getElementById('emu-chat-log');
-    if (emuChatLog) {
-        if (emuChatLog.firstElementChild && emuChatLog.firstElementChild.style.fontStyle === 'italic') emuChatLog.innerHTML = '';
-        const divEmu = document.createElement('div');
-        divEmu.style.wordBreak = 'break-word';
-        divEmu.innerHTML = `<strong style="color: var(--accent);">${escHtml(sender)}:</strong> ${escHtml(text)}`;
-        emuChatLog.appendChild(divEmu);
-        emuChatLog.scrollTop = emuChatLog.scrollHeight;
-    }
+// Send to every connected, accepted friend. Returns true if anyone was reachable.
+function broadcastChat(text) {
+    text = String(text || '').trim().slice(0, CHAT_MAX_LEN);
+    if (!text) return false;
+    let sent = false;
+    P2P.conns.forEach(rec => {
+        if (rec.accepted && rec.open) { safeSend(rec.conn, { t: 'chat', text }); sent = true; }
+    });
+    if (sent) appendChatMessage('You', text);
+    return sent;
 }
 
 function sendChatMessage() {
     const input = document.getElementById('p2p-chat-input');
-    const text = input.value.trim();
-    if (!text) return;
-
-    let sent = false;
-    // Broadcast chat to all active accepted connections
-    P2P.conns.forEach(rec => {
-        if (rec.accepted && rec.open) {
-            safeSend(rec.conn, { t: 'chat', text });
-            sent = true;
-        }
-    });
-
-    if (sent) {
-        appendChatMessage('You', text);
-        input.value = '';
-    } else {
-        showToast('Connect to a friend first!', 'warn');
-    }
+    if (!input.value.trim()) return;
+    if (broadcastChat(input.value)) input.value = '';
+    else showToast('Connect to a friend first!', 'warn');
 }
 
 // ---- Library compare ---------------------------------------------------------
@@ -4062,17 +4113,21 @@ async function onRomMeta(rec, msg) {
     if (!Number.isInteger(size) || size <= 0 || size > ROM_MAX || chunks !== Math.ceil(size / ROM_CHUNK)) {
         romWantedDone(rec.id, key); showToast('The incoming game looked invalid, so it was ignored.', 'warn'); return;
     }
+    if (_romIn.has(rec.id)) failRomIn(rec.id, 'Replaced by a new transfer.');
+    // Register the transfer BEFORE the async library lookup below. The sender streams chunks right
+    // behind this message, and any that arrived while we were awaiting IndexedDB used to be dropped,
+    // which then failed the whole copy as "corrupted".
+    const prog = makeProgressToast(`Receiving "${libStrip(name)}"… 0%`, 'download');
+    const t = { name, size, chunks, got: 0, bytes: 0, parts: [], prog, pct: -1 };
+    _romIn.set(rec.id, t);
     try {
         if (await getROM(name)) {
+            if (_romIn.get(rec.id) === t) _romIn.delete(rec.id);
             romWantedDone(rec.id, key);
             safeSend(rec.conn, { t: 'rom-cancel', name });
-            showToast(`You already have "${escHtml(libStrip(name))}".`, 'info');
-            return;
+            prog.close(`You already have "${libStrip(name)}".`, 'info');
         }
     } catch (e) { /* carry on */ }
-    if (_romIn.has(rec.id)) failRomIn(rec.id, 'Replaced by a new transfer.');
-    const prog = makeProgressToast(`Receiving "${libStrip(name)}"… 0%`, 'download');
-    _romIn.set(rec.id, { name, size, chunks, got: 0, bytes: 0, parts: [], prog, pct: -1 });
 }
 
 function onRomChunk(rec, msg) {
@@ -4149,9 +4204,13 @@ async function sendRom(rec, rom) {
     const label = libStrip(rom.name);
     const prog = makeProgressToast(`Sending "${label}" to ${rec.name}… 0%`, 'upload');
     try {
-        const buf  = await rom.data.arrayBuffer();
-        const size = buf.byteLength;
+        // Read the file in 1 MB slices instead of loading the whole ROM into memory
+        // (a 256 MB .nds used to mean a 256 MB buffer, which kills phone tabs).
+        const blob = rom.data;
+        const size = blob.size;
         if (!size || size > ROM_MAX) throw new Error('size not allowed');
+        const SLICE = 16 * ROM_CHUNK;
+        let buf = null, bufStart = 0;
         const chunks = Math.ceil(size / ROM_CHUNK);
         safeSend(rec.conn, { t: 'rom-meta', name: rom.name, size, chunks });
         const dc = rec.conn.dataChannel;
@@ -4162,7 +4221,12 @@ async function sendRom(rec, rom) {
                 await new Promise(r => setTimeout(r, 20));
                 if (!rec.conn.open) throw new Error('connection lost');
             }
-            rec.conn.send({ t: 'rom-chunk', i, data: buf.slice(i * ROM_CHUNK, (i + 1) * ROM_CHUNK) });
+            const off = i * ROM_CHUNK;
+            if (!buf || off >= bufStart + buf.byteLength) {
+                bufStart = off;
+                buf = await blob.slice(off, off + SLICE).arrayBuffer();
+            }
+            rec.conn.send({ t: 'rom-chunk', i, data: buf.slice(off - bufStart, off - bufStart + ROM_CHUNK) });
             const pct = Math.floor(((i + 1) / chunks) * 100);
             if (pct !== lastPct) { lastPct = pct; prog.set(`Sending "${label}" to ${rec.name}… ${pct}%`); }
         }
@@ -4203,6 +4267,17 @@ window.addEventListener('load', initP2P);
 
 // Let go of the ID cleanly when leaving
 window.addEventListener('pagehide', () => { try { if (P2P.peer) P2P.peer.destroy(); } catch (e) {} });
+
+// Phones and laptops drop the signalling connection when a tab is backgrounded, and pagehide above
+// destroys the peer when the page goes into the back/forward cache. Bring it back instead of leaving
+// the user showing as "offline" to their friends until they reload.
+function ensurePeerAlive() {
+    if (!P2P.peer || P2P.peer.destroyed) { startPeer(); return; }
+    if (P2P.peer.disconnected) { try { P2P.peer.reconnect(); } catch (e) { startPeer(); } return; }
+    if (P2P.peer.open) reconnectFriends();
+}
+window.addEventListener('pageshow', e => { if (e.persisted) startPeer(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ensurePeerAlive(); });
 
 
 // ─────────────────────────────────────────────────────────────
@@ -4554,6 +4629,13 @@ window.onload = async () => {
     initThemeSettings();
     dcInit();
 
+    // Restore sort preference (before the first render, so the library opens in your order)
+    const savedSort = localStorage.getItem('ndsweb_sort') || 'recent';
+    document.getElementById('sort-select').value = savedSort;
+    document.getElementById('sort-select').addEventListener('change', e => {
+        localStorage.setItem('ndsweb_sort', e.target.value);
+    });
+
     try {
         await initDB();
         await renderLibrary();
@@ -4561,13 +4643,6 @@ window.onload = async () => {
         showToast('Private browsing may limit storage features.', 'warn', 6000);
         console.warn('DB init error:', e);
     }
-
-    // Restore sort preference
-    const savedSort = localStorage.getItem('ndsweb_sort') || 'recent';
-    document.getElementById('sort-select').value = savedSort;
-    document.getElementById('sort-select').addEventListener('change', e => {
-        localStorage.setItem('ndsweb_sort', e.target.value);
-    });
 };
 
 // Make the Watch Panel Draggable
