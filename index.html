@@ -2909,7 +2909,33 @@ document.getElementById('upload-gbc-bios').addEventListener('change', e => handl
 // ─────────────────────────────────────────────────────────────
 // EMULATORJS LAUNCH
 // ─────────────────────────────────────────────────────────────
-async function launchEmulator(file, gameName) {
+// The emulator draws with WebGL2. When that isn't available (graphics acceleration turned off,
+// a blocklisted GPU, or an extension that blocks canvas/WebGL) the core dies with a cryptic
+// "Failed to start game" and a black screen. Returns a human explanation, or null if all is well.
+function webglProblem() {
+    const tryCtx = type => {
+        try {
+            const gl = document.createElement('canvas').getContext(type);
+            if (gl) { const x = gl.getExtension && gl.getExtension('WEBGL_lose_context'); if (x) x.loseContext(); }   // free the context straight away
+            return !!gl;
+        } catch (e) { return false; }
+    };
+    if (tryCtx('webgl2')) return null;
+    const how = " In Chrome, open Settings \u2192 System, turn on \"Use graphics acceleration when available\" and restart Chrome." +
+                " Then open chrome://gpu and check that WebGL2 says \"Hardware accelerated\". Extensions that block canvas/WebGL fingerprinting can cause this too (an Incognito window is a quick test).";
+    return tryCtx('webgl')
+        ? "Your browser only offers the older WebGL 1, but the emulator needs WebGL 2." + how
+        : "Your browser couldn't start WebGL, which the emulator needs to draw the game." + how;
+}
+
+async function launchEmulator(file, gameName, skipGlCheck = false) {
+    if (!skipGlCheck) {
+        const problem = webglProblem();
+        if (problem) {
+            showModal('Graphics acceleration is off', problem, () => launchEmulator(file, gameName, true), 'Try anyway');
+            return;
+        }
+    }
     const lower = gameName.toLowerCase();
     let coreName = 'nds', coreDisplayName = 'melonDS';
     if (lower.endsWith('.gba'))                        { coreName = 'gba'; coreDisplayName = 'mGBA';     }
