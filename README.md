@@ -37,6 +37,7 @@ Play Nintendo DS, Game Boy Advance, Game Boy, NES, SNES, Game Gear, and Atari 26
 * **Save Manager** (Settings): see every game save and save state stored in the browser, filter them, **rename** them, or **delete** individual ones. Renaming only changes the label shown in the manager, so the game still finds its save.
 * **Export / import** raw `.sav` files, or back up your whole library's saves (labels included) as a JSON file.
 * **Local Storage meter** shows how much browser storage you're using.
+* **Export / Import Library** (Settings): back your games up as `.zip` files (split into ~1.5 GB parts for big libraries, with custom covers and dates included) and restore them in another browser. Import also accepts loose ROM files or ordinary `.zip` archives of ROMs, and skips games you already have. BIOS files and saves are not included (use Export Saves for saves).
 * Atari 2600 games have no battery saves, so they won't appear in the Save Manager.
 
 ### Connect (peer-to-peer, via PeerJS)

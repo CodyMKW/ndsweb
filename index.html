@@ -1359,6 +1359,15 @@
                                     <input type="file" id="import-saves-input" accept=".json" class="hidden" />
                                 </button>
                             </div>
+                            <div class="storage-btn-row">
+                                <button id="export-library-btn" class="btn-accent" title="Download all your games as .zip files">
+                                    <i data-lucide="package" style="width:1rem;height:1rem;"></i> Export Library
+                                </button>
+                                <button id="import-library-btn" class="btn-accent" title="Restore games from a library .zip (or add loose ROM files)">
+                                    <i data-lucide="package-open" style="width:1rem;height:1rem;"></i> Import Library
+                                </button>
+                                <input type="file" id="import-library-input" accept=".zip,.nds,.gba,.gb,.gbc,.nes,.sfc,.gg,.a26" multiple class="hidden" />
+                            </div>
                             <div class="divider"></div>
                             <div class="storage-btn-row">
                                 <button id="clear-library-btn" class="btn-danger">
@@ -2497,6 +2506,232 @@ document.getElementById('import-saves-input').addEventListener('change', async e
     }
     e.target.value = '';
 });
+
+// ─────────────────────────────────────────────────────────────
+// EXPORT / IMPORT LIBRARY
+//  ROMs are far too big for a JSON file, so the library is packed into plain
+//  (uncompressed) .zip files that any unzip tool can open. A "part" is capped at
+//  LIB_PART_BYTES so every archive stays inside the classic 4 GB zip limits; big
+//  libraries simply download as several parts. A small manifest inside each zip
+//  carries the custom covers and dates. Import reads those zips back (and also
+//  ordinary zips of ROMs, or loose ROM files) and skips games you already have.
+// ─────────────────────────────────────────────────────────────
+const LIB_ROM_RE   = /\.(nds|gba|gb|gbc|nes|sfc|gg|a26)$/i;
+const LIB_MANIFEST = 'ndsweb-library.json';
+let   LIB_PART_BYTES = 1.5 * 1024 * 1024 * 1024;
+
+const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+    return t;
+})();
+
+async function blobCrc32(blob) {
+    let crc = 0xFFFFFFFF;
+    const STEP = 4 * 1024 * 1024;                       // read big files a few MB at a time
+    for (let off = 0; off < blob.size; off += STEP) {
+        const u8 = new Uint8Array(await blob.slice(off, off + STEP).arrayBuffer());
+        for (let i = 0; i < u8.length; i++) crc = CRC_TABLE[(crc ^ u8[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// entries: [{ name, blob, crc }] -> one stored (method 0) zip, as a Blob. File blobs are
+// referenced, not copied, so even a 1.5 GB part doesn't sit in memory.
+function buildZip(entries) {
+    const d = new Date();
+    const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    const enc  = new TextEncoder();
+    const body = [], central = [];
+    let offset = 0, cdSize = 0;
+    for (const e of entries) {
+        const name = enc.encode(e.name), size = e.blob.size;
+        const lh = new DataView(new ArrayBuffer(30));
+        lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true);  lh.setUint16(6, 0x0800, true);   // flag: UTF-8 names
+        lh.setUint16(8, 0, true);          lh.setUint16(10, time, true); lh.setUint16(12, date, true);
+        lh.setUint32(14, e.crc, true);     lh.setUint32(18, size, true); lh.setUint32(22, size, true);
+        lh.setUint16(26, name.length, true);
+        body.push(lh.buffer, name, e.blob);
+
+        const ch = new DataView(new ArrayBuffer(46));
+        ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+        ch.setUint16(10, 0, true);         ch.setUint16(12, time, true); ch.setUint16(14, date, true);
+        ch.setUint32(16, e.crc, true);     ch.setUint32(20, size, true); ch.setUint32(24, size, true);
+        ch.setUint16(28, name.length, true);
+        ch.setUint32(42, offset, true);
+        central.push(ch.buffer, name);
+        cdSize += 46 + name.length;
+        offset += 30 + name.length + size;
+    }
+    const eo = new DataView(new ArrayBuffer(22));
+    eo.setUint32(0, 0x06054b50, true);
+    eo.setUint16(8, entries.length, true); eo.setUint16(10, entries.length, true);
+    eo.setUint32(12, cdSize, true);        eo.setUint32(16, offset, true);
+    return new Blob([...body, ...central, eo.buffer], { type: 'application/zip' });
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);          // big downloads need the URL to outlive the click
+}
+
+async function exportLibrary() {
+    const btn = document.getElementById('export-library-btn');
+    if (btn.disabled || !db) return;
+    let prog = null;
+    try {
+        const all = (await getROMs()).filter(r => !r.name.startsWith('_bios_') && r.data && r.data.size > 0);
+        if (!all.length) { showToast('No games to export.', 'warn'); return; }
+        btn.disabled = true;
+
+        const parts = []; let cur = [], curBytes = 0;
+        for (const r of all) {
+            if (cur.length && curBytes + r.data.size > LIB_PART_BYTES) { parts.push(cur); cur = []; curBytes = 0; }
+            cur.push(r); curBytes += r.data.size;
+        }
+        if (cur.length) parts.push(cur);
+
+        const total = all.reduce((n, r) => n + r.data.size, 0);
+        prog = makeProgressToast(`Packing ${all.length} game${all.length > 1 ? 's' : ''} (${fmtBytes(total)})…`, 'package');
+        const stamp = new Date().toISOString().slice(0, 10);
+        let done = 0;
+        for (let p = 0; p < parts.length; p++) {
+            const entries = [];
+            for (const r of parts[p]) {
+                prog.set(`Packing "${libStrip(r.name)}"… (${++done}/${all.length})`);
+                entries.push({ name: r.name, blob: r.data, crc: await blobCrc32(r.data) });
+            }
+            const manifest = { app: 'NDSWeb', version: 1, exported: new Date().toISOString(),
+                games: parts[p].map(r => ({ name: r.name, timestamp: r.timestamp || 0, lastPlayed: r.lastPlayed || 0, customCover: r.customCover || null })) };
+            const mBlob = new Blob([JSON.stringify(manifest, null, 1)], { type: 'application/json' });
+            entries.push({ name: LIB_MANIFEST, blob: mBlob, crc: await blobCrc32(mBlob) });
+            downloadBlob(buildZip(entries), parts.length > 1 ? `ndsweb-library-${stamp}-part${p + 1}of${parts.length}.zip` : `ndsweb-library-${stamp}.zip`);
+            if (p < parts.length - 1) await new Promise(r => setTimeout(r, 1500));        // let the browser start each download
+        }
+        prog.close(parts.length > 1
+            ? `Exported ${all.length} games as ${parts.length} .zip files. Allow multiple downloads if your browser asks.`
+            : `Exported ${all.length} game${all.length > 1 ? 's' : ''}.`, 'success', 6000);
+    } catch (e) {
+        console.error('Library export failed', e);
+        if (prog) prog.close('Library export failed.', 'error', 5000); else showToast('Library export failed.', 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// ---- reading zips --------------------------------------------------------------
+async function readZipEntries(file) {
+    const size = file.size, tailLen = Math.min(size, 65557);
+    const tail = new DataView(await file.slice(size - tailLen).arrayBuffer());
+    let eocd = -1;
+    for (let i = tailLen - 22; i >= 0; i--) if (tail.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('not a zip file');
+    const count = tail.getUint16(eocd + 10, true), cdSize = tail.getUint32(eocd + 12, true), cdOff = tail.getUint32(eocd + 16, true);
+    if (count === 0xFFFF || cdSize === 0xFFFFFFFF || cdOff === 0xFFFFFFFF) throw new Error('ZIP64 archives are not supported');
+    const cd  = new DataView(await file.slice(cdOff, cdOff + cdSize).arrayBuffer());
+    const dec = new TextDecoder();
+    const out = [];
+    for (let i = 0, p = 0; i < count && p + 46 <= cd.byteLength; i++) {
+        if (cd.getUint32(p, true) !== 0x02014b50) break;
+        const flags = cd.getUint16(p + 8, true), method = cd.getUint16(p + 10, true);
+        const comp  = cd.getUint32(p + 20, true), nl = cd.getUint16(p + 28, true), el = cd.getUint16(p + 30, true), cl = cd.getUint16(p + 32, true);
+        out.push({ name: dec.decode(new Uint8Array(cd.buffer, p + 46, nl)), method, comp, flags, lo: cd.getUint32(p + 42, true) });
+        p += 46 + nl + el + cl;
+    }
+    return out;
+}
+
+async function zipEntryBlob(file, e) {
+    if (e.flags & 1)            throw new Error('encrypted zips are not supported');
+    if (e.comp === 0xFFFFFFFF)  throw new Error('ZIP64 archives are not supported');
+    const lh = new DataView(await file.slice(e.lo, e.lo + 30).arrayBuffer());
+    if (lh.getUint32(0, true) !== 0x04034b50) throw new Error('corrupt zip entry');
+    const start = e.lo + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+    const raw   = file.slice(start, start + e.comp);
+    if (e.method === 0) return raw;
+    if (e.method === 8 && typeof DecompressionStream !== 'undefined')
+        return await new Response(raw.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
+    throw new Error('unsupported compression (re-zip it with "Store" or "Deflate")');
+}
+
+async function importLibrary(fileList) {
+    const files = [...fileList];                                  // copy now: the input is cleared right after
+    if (!files.length || !db) return;
+    const btn = document.getElementById('import-library-btn');
+    btn.disabled = true;
+    const prog = makeProgressToast('Reading files…', 'package-open');
+    let added = 0, skipped = 0, failed = 0, storageFull = false;
+    try {
+        const manifest = new Map();                               // name -> { timestamp, lastPlayed, customCover }
+        const queue = [];                                         // { name, load() }
+        for (const f of files) {
+            if (/\.zip$/i.test(f.name)) {
+                try {
+                    const entries = await readZipEntries(f);
+                    const mf = entries.find(e => e.name === LIB_MANIFEST);
+                    if (mf) {
+                        try {
+                            const j = JSON.parse(await (await zipEntryBlob(f, mf)).text());
+                            (Array.isArray(j.games) ? j.games : []).forEach(g => { if (g && typeof g.name === 'string') manifest.set(g.name, g); });
+                        } catch (e) { /* the games themselves still import without it */ }
+                    }
+                    for (const e of entries) {
+                        if (e.name.endsWith('/')) continue;
+                        const base = e.name.split('/').pop();     // flatten folders inside someone else's zip
+                        if (LIB_ROM_RE.test(base)) queue.push({ name: base, load: () => zipEntryBlob(f, e) });
+                    }
+                } catch (err) { console.warn('Could not read', f.name, err); failed++; showToast(`Couldn't read "${escHtml(f.name)}": ${escHtml(err.message)}.`, 'error', 6000); }
+            } else if (LIB_ROM_RE.test(f.name)) {
+                queue.push({ name: f.name, load: async () => f });
+            }
+        }
+        if (!queue.length && !failed) { prog.close('No games found in those files.', 'warn', 4000); return; }
+
+        let n = 0;
+        for (const item of queue) {
+            prog.set(`Importing "${libStrip(item.name)}"… (${++n}/${queue.length})`);
+            try {
+                if (await getROM(item.name)) { skipped++; continue; }        // already in the library
+                const blob = await item.load();
+                if (!blob.size) { failed++; continue; }
+                const meta = manifest.get(item.name) || {};
+                await saveToDB(STORE_ROMS, {
+                    name: item.name,
+                    data: new File([blob], item.name),
+                    timestamp:  Number(meta.timestamp) || Date.now(),
+                    lastPlayed: Number(meta.lastPlayed) || 0,
+                    size: (blob.size / (1024 * 1024)).toFixed(2) + ' MB',
+                    ...(typeof meta.customCover === 'string' && /^https?:\/\//i.test(meta.customCover) ? { customCover: meta.customCover } : {})
+                });
+                added++;
+            } catch (err) {
+                console.warn('Import failed for', item.name, err);
+                failed++;
+                if (err && err.name === 'QuotaExceededError') { storageFull = true; break; }
+            }
+        }
+        await renderLibrary();
+        updateStorageMeter();
+        const bits = [`${added} game${added === 1 ? '' : 's'} imported`];
+        if (skipped) bits.push(`${skipped} already in your library`);
+        if (failed)  bits.push(`${failed} failed`);
+        if (storageFull) bits.push('browser storage is full');
+        prog.close(bits.join(', ') + '.', failed || storageFull ? 'warn' : 'success', 6000);
+    } catch (e) {
+        console.error('Library import failed', e);
+        prog.close('Library import failed.', 'error', 5000);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+document.getElementById('export-library-btn').addEventListener('click', exportLibrary);
+document.getElementById('import-library-btn').addEventListener('click', () => document.getElementById('import-library-input').click());
+document.getElementById('import-library-input').addEventListener('change', e => { importLibrary(e.target.files); e.target.value = ''; });
 
 // ─────────────────────────────────────────────────────────────
 // LIBRARY SEARCH & SORT
