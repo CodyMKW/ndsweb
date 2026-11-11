@@ -100,8 +100,6 @@ Built with plain web standards and no frontend framework:
 * **[Lucide](https://lucide.dev/)** for icons.
 * **Cloudflare Worker** (`ndsweb-helper`) for Discord OAuth and cover-art assets only.
 
-The `experimental/` folder holds an older copy of the page.
-
 ---
 
 ## ⚖️ ROMs
