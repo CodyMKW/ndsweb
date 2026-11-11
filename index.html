@@ -2921,8 +2921,9 @@ function webglProblem() {
         } catch (e) { return false; }
     };
     if (tryCtx('webgl2')) return null;
-    const how = " In Chrome, open Settings \u2192 System, turn on \"Use graphics acceleration when available\" and restart Chrome." +
-                " Then open chrome://gpu and check that WebGL2 says \"Hardware accelerated\". Extensions that block canvas/WebGL fingerprinting can cause this too (an Incognito window is a quick test).";
+    const how = " In Chrome, open chrome://gpu: WebGL2 should say \"Hardware accelerated\". If it says \"Software only\" or \"Disabled\", Chrome can't use your graphics card" +
+                " (newer Chrome no longer falls back to software WebGL). Turn on Settings \u2192 System \u2192 \"Use graphics acceleration when available\", update your graphics drivers, and restart Chrome." +
+                " Another browser (Edge or Firefox) will likely work right away. Extensions that block canvas/WebGL fingerprinting can cause this too (an Incognito window is a quick test).";
     return tryCtx('webgl')
         ? "Your browser only offers the older WebGL 1, but the emulator needs WebGL 2." + how
         : "Your browser couldn't start WebGL, which the emulator needs to draw the game." + how;
